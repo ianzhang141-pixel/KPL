@@ -271,6 +271,8 @@ class RulesAreMarkedUnverified(unittest.TestCase):
         self.assertEqual(rules.value(table, "stormDragonFromSec"), 1200)
         self.assertTrue(table["tyrantFirstSpawnSec"]["verified"])
         self.assertEqual(table["tyrantFirstSpawnSec"]["season"], "S44")
+        self.assertTrue(table["tyrantFirstSpawnSec"]["official"])
+        self.assertFalse(table["tyrantFirstSpawnSec"]["externalVerified"])
         self.assertIn("maxLevel", rules.unverified(table),
                       "用户没有在本批信息中确认最高等级，不能顺手标成已核对")
 
@@ -284,6 +286,8 @@ class RulesAreMarkedUnverified(unittest.TestCase):
     def test_s44_knowledge_keeps_ambiguities_out_of_calculation(self):
         payload = season_s44.payload()
         self.assertEqual(payload["season"], "S44")
+        self.assertTrue(payload["official"])
+        self.assertEqual(payload["officialStatus"], "user_attested_official")
         self.assertFalse(payload["externalVerified"])
         ambiguous = {entry["id"]: entry for entry in payload["rules"]
                      if not entry["machineActive"]}
@@ -292,6 +296,16 @@ class RulesAreMarkedUnverified(unittest.TestCase):
         self.assertIn("minion_speed", ambiguous)
         self.assertIn("red_falcon", ambiguous)
         self.assertGreater(payload["machineActiveCount"], 15)
+
+    def test_official_ambiguities_are_not_guessed(self):
+        payload = season_s44.payload()
+        entries = {entry["id"]: entry for entry in payload["rules"]}
+        self.assertEqual(entries["minion_speed"]["values"]["sourceSideEndText"],
+                         "180分钟")
+        self.assertFalse(entries["minion_speed"]["machineActive"])
+        self.assertEqual(entries["red_falcon"]["values"]["teamGoldSourceText"],
+                         "25～20")
+        self.assertFalse(entries["red_falcon"]["machineActive"])
 
     def test_s44_spawn_times_reject_impossible_early_kills(self):
         with tempfile.TemporaryDirectory() as raw:

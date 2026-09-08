@@ -16,7 +16,7 @@ LOL 项目里有一个明确的 bug：先锋（RIFTHERALD）和虚空幼虫（HO
 暴君几分几秒刷新、主宰什么时候变成风暴龙王、每路有几座塔 —— 这些数字
 **每个赛季都可能调整**，写代码的人（包括 AI）凭记忆写下来的很可能是过时的。
 
-所以这里的每一条都带 `verified` 标记。用户已提供的S44明确数值标为 `True`，
+所以这里的每一条都带 `verified` 标记。用户提供的S44官方说明中明确的数值标为 `True`，
 没有被本次信息覆盖的旧默认值仍为 `False`，意思是
 **「这是待核对的默认值，不是已确认的事实」**。
 `kplab check` 会在报告顶部提醒还有多少条没核对。
@@ -98,7 +98,7 @@ BUFFS = {
 # ---------------------------------------------------------------- 可计算核心常量
 
 CURRENT_SEASON = "S44"
-USER_RULE_SOURCE = "用户提供于 2026-09-08"
+OFFICIAL_RULE_SOURCE = "用户提供的S44官方说明于 2026-09-09"
 
 
 def _pending(value: Any, what: str, why: str = "") -> dict[str, Any]:
@@ -107,12 +107,14 @@ def _pending(value: Any, what: str, why: str = "") -> dict[str, Any]:
 
 
 def _confirmed(value: Any, what: str, why: str = "") -> dict[str, Any]:
-    """用户明确提供的当前赛季常量；不等同于外部官方来源复核。"""
+    """用户提供的官方说明中的明确常量；尚未用原始公告链接独立核验。"""
     return {"value": value, "verified": True, "what": what, "why": why,
-            "season": CURRENT_SEASON, "by": USER_RULE_SOURCE}
+            "season": CURRENT_SEASON, "by": OFFICIAL_RULE_SOURCE,
+            "official": True, "externalVerified": False,
+            "sourceAuthority": "official_description_provided_by_user"}
 
 
-# S44中由用户明确提供的整数已标记为用户核对；其余仍是待核对默认值。
+# S44官方说明中明确的整数已标记为核对；其余仍是待核对默认值。
 # 网页再次核对会写进 rules_override.json，不用修改源码。
 DEFAULTS: dict[str, dict[str, Any]] = {
     "towersPerLane": _pending(

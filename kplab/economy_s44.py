@@ -1,7 +1,7 @@
 """S44 经济机制参考库。
 
 来源为用户提供的《S44王者经济机制》文档。文档明确声明是业余实测、非官方
-数据，因此这里的规则不能覆盖用户此前明确给出的 S44 规则，也不能作为硬性
+数据，因此这里的规则不能覆盖用户提供的 S44 官方说明，也不能作为硬性
 合法性校验。内部一致且公式完整的条目可以用于带来源标记的估算；冲突、模糊
 或只在训练营/指挥官模式出现的条目必须隔离。
 """
@@ -22,7 +22,8 @@ META = {
     "externalVerified": False,
     "official": False,
     "defaultConfidence": 0.55,
-    "usagePolicy": "仅用于带来源标记的估算；不得覆盖用户已确认规则或充当训练真值。",
+    "authorityRank": 20,
+    "usagePolicy": "仅用于带来源标记的估算；不得覆盖S44官方说明或充当训练真值。",
 }
 
 
@@ -30,6 +31,7 @@ STATUS_LABELS = {
     "reference_calculable": "参考公式可计算",
     "reference_only": "仅作参考",
     "conflict": "与现有规则冲突",
+    "superseded_by_official": "已按官方说明停用",
     "ambiguous": "条件不完整",
     "out_of_scope": "非标准对局范围",
 }
@@ -108,12 +110,12 @@ ENTRIES = [
            "首波0:10刷新，之后每33秒一波；10分钟前首波约0:30交汇，之后每33秒交汇。",
            {"spawnFormulaSec": "33*n-23", "clashFormulaBefore10MinSec": "33*n-3",
             "firstSpawnSec": 10, "respawnSec": 33}, [1],
-           "reference_calculable", "刷新时间与现有用户确认规则一致；交汇时间仍是参考值。"),
+           "reference_calculable", "刷新时间与S44官方说明一致；交汇时间仍是非官方参考值。"),
     _entry("early_mid_wave_conflict", "兵线", "前4分钟中路兵线组成",
-           "文档称中路为2近战+2远程；现有用户确认规则为1近战+2普通法师兵。",
+           "文档称中路为2近战+2远程；S44官方说明为1近战+2普通法师兵。",
            {"document": {"melee": 2, "ranged": 2},
-            "currentConfirmed": {"melee": 1, "ranged": 2}}, [2], "conflict",
-           "保留现有用户确认规则，文档数值不得参与计算。"),
+            "official": {"melee": 1, "ranged": 2}}, [2], "superseded_by_official",
+           "采用官方说明；非官方文档数值已停用，不得参与计算。"),
     _entry("early_lane_wave_gold", "兵线", "前7波三路单人补刀经济",
            "文档记录前7波对抗路、中路、发育路单人补刀总经济序列。",
            {"clashLane": [190, 190, 194, 199, 204, 210, 211],
@@ -149,8 +151,8 @@ ENTRIES = [
     _entry("red_falcon_gold_conflict", "野怪", "红隼团队金币",
            "文档称队友固定各得20金币，击杀者另有随时间成长的补刀经济；现有用户原文为每人25至20。",
            {"documentTeamGoldPerAlly": 20, "documentLastHitGoldRange": [64, 90],
-            "currentConfirmedSourceText": "25～20"}, [3], "conflict",
-           "20金币可作为后续核对候选，但在确认前继续保持红隼金币规则不可计算。"),
+            "officialSourceText": "25～20"}, [3], "superseded_by_official",
+           "采用官方原文“25～20”；因变化方向或条件不明，仍保持不可计算。"),
     _entry("spirit_gold", "野怪", "空间之灵团队经济",
            "文档称击杀者基础经济随时间增长，且全队每人获得10金币；与现有全队合计50金币一致。",
            {"teamGoldPerHero": 10, "teamGoldTotal": 50,
@@ -158,10 +160,10 @@ ENTRIES = [
                                     6: 64, 7: 66, 8: 69, 9: 70, 10: 72, 11: 75}}, [3],
            "reference_only", "标准对局只在4分钟前刷新；后续分钟数据可能来自延迟击杀或训练模式。"),
     _entry("tyrant_respawn_conflict", "龙", "普通暴君重生间隔",
-           "文档把暴君和主宰都记为击杀后4分钟刷新；现有用户确认规则为暴君3分30秒、主宰4分钟。",
-           {"documentTyrantRespawnSec": 240, "currentConfirmedTyrantRespawnSec": 210,
-            "documentAndCurrentOverlordRespawnSec": 240}, [3], "conflict",
-           "暴君继续使用用户确认的210秒；主宰240秒保持不变。"),
+           "文档把暴君和主宰都记为击杀后4分钟刷新；S44官方说明为暴君3分30秒、主宰4分钟。",
+           {"documentTyrantRespawnSec": 240, "officialTyrantRespawnSec": 210,
+            "documentAndOfficialOverlordRespawnSec": 240}, [3], "superseded_by_official",
+           "采用官方说明：暴君210秒、主宰240秒。"),
     _entry("objective_economy", "龙", "龙的补刀与全队经济参考",
            "文档记录携带二/三级打野刀的击杀者补刀经济和4名队友低保经济。",
            {"overlord": {"lastHit": 40, "ally": 20, "teamTotal": 120},
@@ -184,10 +186,10 @@ ENTRIES = [
             "nearbyBonusPoolPctOfBase": 50, "crystalGold": 0}, [4],
            "reference_calculable", "补刀奖励按范围内人数平分，与最后一击和辅助装无关。"),
     _entry("vision_spirit_respawn_conflict", "防御塔", "二塔视野之灵重生时间",
-           "文档记为持续60秒、120秒刷新；现有用户确认规则记为20秒重生。",
+           "文档记为持续60秒、120秒刷新；S44官方说明记为20秒重生。",
            {"durationSec": 60, "documentRespawnSec": 120,
-            "currentConfirmedRespawnSec": 20, "gold": 1}, [4], "conflict",
-           "继续使用20秒现有规则；1金币奖励两边资料一致。"),
+            "officialRespawnSec": 20, "gold": 1}, [4], "superseded_by_official",
+           "采用官方说明的20秒；1金币奖励两边资料一致。"),
     _entry("catchup_thresholds", "人头", "8%经济追赶机制",
            "文档称达到分时段团队经济差阈值后，优势方人头收益乘0.92，劣势方乘1.08。",
            {"advantagedMultiplier": 0.92, "disadvantagedMultiplier": 1.08,
@@ -251,8 +253,11 @@ def payload() -> dict[str, Any]:
         "entryCount": len(entries),
         "calculableCount": sum(1 for item in entries if item["estimateAllowed"]),
         "conflictCount": sum(1 for item in entries if item["status"] == "conflict"),
+        "supersededCount": sum(1 for item in entries
+                               if item["status"] == "superseded_by_official"),
         "excludedCount": sum(1 for item in entries
-                             if item["status"] in {"conflict", "ambiguous", "out_of_scope"}),
+                             if item["status"] in {"conflict", "superseded_by_official",
+                                                   "ambiguous", "out_of_scope"}),
     }
 
 

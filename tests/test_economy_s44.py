@@ -16,16 +16,29 @@ class EconomyProvenance(unittest.TestCase):
         ids = [entry["id"] for entry in payload["entries"]]
         self.assertEqual(len(ids), len(set(ids)))
 
-    def test_all_known_conflicts_are_isolated(self):
-        conflicts = {entry["id"]: entry for entry in economy_s44.payload()["entries"]
-                     if entry["status"] == "conflict"}
-        self.assertEqual(set(conflicts), {
+    def test_non_official_conflicts_are_superseded_by_official_rules(self):
+        data = economy_s44.payload()
+        superseded = {entry["id"]: entry for entry in data["entries"]
+                      if entry["status"] == "superseded_by_official"}
+        self.assertEqual(set(superseded), {
             "early_mid_wave_conflict", "red_falcon_gold_conflict",
             "tyrant_respawn_conflict", "vision_spirit_respawn_conflict",
         })
-        self.assertTrue(all(not entry["estimateAllowed"] for entry in conflicts.values()))
-        self.assertEqual(conflicts["tyrant_respawn_conflict"]["values"]
-                         ["currentConfirmedTyrantRespawnSec"], 210)
+        self.assertEqual(data["conflictCount"], 0)
+        self.assertEqual(data["supersededCount"], 4)
+        self.assertTrue(all(not entry["estimateAllowed"] for entry in superseded.values()))
+        self.assertEqual(superseded["tyrant_respawn_conflict"]["values"]
+                         ["officialTyrantRespawnSec"], 210)
+
+    def test_official_authority_outranks_non_official_economy_notes(self):
+        from kplab import knowledge_s44, season_s44
+
+        official = season_s44.payload()
+        reference = economy_s44.payload()
+        self.assertTrue(official["official"])
+        self.assertFalse(official["externalVerified"])
+        self.assertGreater(official["authorityRank"], reference["authorityRank"])
+        self.assertGreater(official["authorityRank"], knowledge_s44.payload()["authorityRank"])
 
 
 class EconomyReferenceCalculations(unittest.TestCase):

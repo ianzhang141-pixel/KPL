@@ -258,10 +258,10 @@
 </div>
 
 <div class="card">
-  <h2>S44 赛季规则库 <span class="pill on" id="seasonBadge">用户已核对</span></h2>
+  <h2>S44 赛季规则库 <span class="pill on" id="seasonBadge">官方说明</span></h2>
   <p class="hint" id="seasonSummary">正在读取当前赛季规则…</p>
-  <div class="note">“用户已核对”表示已按你提供的内容入库，不代表已用官方公告二次核验。
-存在歧义或缺少具体数值的条目只保存原意，不会参与自动计算。</div>
+  <div class="note">这批内容已由你明确标注为官方说明，优先级高于非官方实测和个人总结。
+目前未附原始公告链接，因此页面同时保留“未独立外部核验”状态；官方原文中的歧义也不会被系统猜值。</div>
   <div id="seasonRuleGroups"></div>
 </div>
 
@@ -269,7 +269,7 @@
   <h2>S44 经济机制参考库 <span class="pill" id="economyBadge">非官方实测</span></h2>
   <p class="hint" id="economySummary">正在读取经济机制资料…</p>
   <div class="note">这份资料来自业余实测，不是官方数据。内部一致的完整公式只能用于带来源和置信度的估算；
-与现有用户确认规则冲突的条目已隔离，不会覆盖赛季常量，也不会充当训练真值。</div>
+与S44官方说明冲突的条目已停用，不会覆盖赛季常量，也不会充当训练真值。</div>
   <div id="economyConflicts"></div>
   <div id="economyRuleGroups"></div>
 </div>
@@ -646,14 +646,14 @@ async function refresh() {
   const r = STATUS.rules;
   $('envRules').innerHTML = r.unverifiedCount
     ? `<span class="pill off">${r.unverifiedCount} 条核心常量待核对</span> 见页面最下方。`
-    : `<span class="pill on">核心常量已核对</span> 赛季规则中的歧义项仍会单独标明。`;
+    : `<span class="pill on">官方常量已接入</span> 官方原文中的歧义项仍会单独标明。`;
   $('s2').className = 'step ' + (r.unverifiedCount ? '' : 'done');
 
   const season = STATUS.seasonRules || {rules:[]};
-  $('seasonBadge').textContent = season.label || '未加载';
+  $('seasonBadge').textContent = season.official ? '官方说明（用户提供）' : (season.label || '未加载');
   $('seasonSummary').textContent = season.rules ?
-    `已收录 ${season.ruleCount} 条；${season.machineActiveCount} 条可计算，` +
-    `${season.needsReviewCount} 条因歧义或数值不完整仅作记录。` : '没有赛季规则。';
+    `已收录 ${season.ruleCount} 条；${season.machineActiveCount} 条官方规则可计算，` +
+    `${season.needsReviewCount} 条官方原文因歧义或数值不完整仅作记录。` : '没有赛季规则。';
   const grouped = {};
   for (const entry of season.rules || []) (grouped[entry.category] ||= []).push(entry);
   $('seasonRuleGroups').innerHTML = Object.entries(grouped).map(([category, entries], groupIndex) => `
@@ -671,10 +671,11 @@ async function refresh() {
   $('economyBadge').textContent = economy.official === false ? '非官方实测' : '来源未知';
   $('economySummary').textContent = economy.entries ?
     `已收录 ${economy.entryCount} 条：${economy.calculableCount} 条完整参考公式可估算，` +
-    `${economy.conflictCount} 条冲突已隔离；所有条目都禁止作为硬性校验。` : '没有经济机制资料。';
-  const conflicts = (economy.entries || []).filter(entry => entry.status === 'conflict');
+    `${economy.supersededCount} 条非官方冲突内容已按官方说明停用；所有条目都禁止作为硬性校验。` : '没有经济机制资料。';
+  const conflicts = (economy.entries || []).filter(entry =>
+    entry.status === 'conflict' || entry.status === 'superseded_by_official');
   $('economyConflicts').innerHTML = conflicts.length ? `
-    <div class="msg warn" style="display:block"><b>发现 ${conflicts.length} 处冲突，现有用户确认规则优先：</b>\n` +
+    <div class="msg warn" style="display:block"><b>${conflicts.length} 处非官方冲突已处理，S44官方说明优先：</b>\n` +
       conflicts.map(entry => `• ${safe(entry.title)}：${safe(entry.note)}`).join('\n') + '</div>' : '';
   const economyGrouped = {};
   for (const entry of economy.entries || []) (economyGrouped[entry.category] ||= []).push(entry);
@@ -683,7 +684,7 @@ async function refresh() {
       <summary>${safe(category)}（${entries.length}条）</summary>
       ${entries.map(entry => `<div class="season-rule">
         <b>${safe(entry.title)}</b>
-        <span class="pill ${entry.estimateAllowed ? 'on' : entry.status === 'conflict' ? 'off' : ''}">${safe(entry.statusLabel)}</span>
+        <span class="pill ${entry.estimateAllowed ? 'on' : ['conflict','superseded_by_official'].includes(entry.status) ? 'off' : ''}">${safe(entry.statusLabel)}</span>
         <p>${safe(entry.summary)}</p>
         <p>来源页：${(entry.sourcePages || []).join('、') || '—'}；硬性校验：禁止</p>
         ${entry.note ? `<p class="warn">注意：${safe(entry.note)}</p>` : ''}
@@ -744,7 +745,7 @@ async function refresh() {
     <tr>
       <td><code>${k}</code><br><span style="color:#8b93a1;font-size:12px">${e.what}</span></td>
       <td><input type="number" id="rv_${k}" value="${e.value}"></td>
-      <td>${e.verified ? '<span class="pill on">已核对</span>' : '<span class="pill off">待核对</span>'}</td>
+      <td>${e.verified ? `<span class="pill on">${e.official ? '官方说明' : '已核对'}</span>` : '<span class="pill off">待核对</span>'}</td>
       <td><button class="ghost" onclick="saveRule('${k}')">确认</button></td>
     </tr>`).join('');
 }

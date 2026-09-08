@@ -1,8 +1,8 @@
 """S44 赛季规则知识库。
 
-来源是用户在 2026-09-08 提供的当前赛季规则说明。`user_confirmed` 表示
-“用户已核对”，不等于已用官方公告二次核验；不完整或疑似笔误的条目不会
-悄悄变成可计算常量。
+来源是用户在 2026-09-09 明确标注为“官方说明”的当前赛季规则文本。
+`official_provided` 表示该条来自这份官方说明；由于没有附原始公告链接，仍明确
+保留“未独立外部核验”的事实。不完整或疑似笔误的官方原文也不会被猜成常量。
 """
 
 from __future__ import annotations
@@ -14,9 +14,15 @@ from typing import Any
 META = {
     "season": "S44",
     "label": "S44（当前赛季）",
-    "providedAt": "2026-09-08",
-    "provenance": "user-provided",
+    "providedAt": "2026-09-09",
+    "provenance": "user-provided-official-description",
+    "official": True,
+    "officialStatus": "user_attested_official",
     "externalVerified": False,
+    "authorityRank": 100,
+    "supersedes": ["user-provided-non-official-testing-notes",
+                   "user-provided-personal-summary"],
+    "usagePolicy": "数值明确的条目优先于非官方实测和个人总结；歧义原文仍不得猜值。",
 }
 
 
@@ -26,7 +32,7 @@ def _rule(
     title: str,
     summary: str,
     values: dict[str, Any],
-    status: str = "user_confirmed",
+    status: str = "official_provided",
     note: str = "",
 ) -> dict[str, Any]:
     return {
@@ -36,7 +42,8 @@ def _rule(
         "summary": summary,
         "values": values,
         "status": status,
-        "machineActive": status == "user_confirmed",
+        "machineActive": status == "official_provided",
+        "sourceAuthority": "official_description_provided_by_user",
         "note": note,
     }
 
@@ -172,9 +179,9 @@ RULES = [
 
 
 STATUS_LABELS = {
-    "user_confirmed": "用户已核对",
-    "incomplete": "数值不完整",
-    "ambiguous": "存在歧义",
+    "official_provided": "官方说明",
+    "incomplete": "官方原文数值不完整",
+    "ambiguous": "官方原文存在歧义",
 }
 
 

@@ -19,6 +19,7 @@ META = {
     "provenance": "user-provided-personal-summary",
     "externalVerified": False,
     "official": False,
+    "authorityRank": 10,
     "defaultConfidence": 0.4,
     "usagePolicy": "术语可用于人工标注归一化；其余内容仅作解释，不得作为硬规则、模型标签或训练真值。",
 }

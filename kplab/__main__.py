@@ -96,8 +96,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     economy = economy_s44.payload()
     print(f"经济机制参考库：{economy['entryCount']}条，其中"
           f"{economy['calculableCount']}条参考公式可估算、"
-          f"{economy['conflictCount']}条与现有规则冲突并已隔离。")
-    print("    来源为非官方实测文档，不用于硬性合法性校验或训练真值。")
+          f"{economy['supersededCount']}条冲突内容已按官方说明停用。")
+    print("    来源为非官方实测文档，权威级别低于S44官方说明，不用于硬性校验或训练真值。")
 
     knowledge = knowledge_s44.payload()
     print(f"通识参考库：{knowledge['entryCount']}条，其中"
