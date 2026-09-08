@@ -22,8 +22,8 @@ import json
 import sys
 from pathlib import Path
 
-from . import (__version__, annotate, check, economy_s44, evaluate, hud, minimap,
-               ocr, paths, rules, schema, sources, state as state_mod, store,
+from . import (__version__, annotate, check, economy_s44, evaluate, hud, knowledge_s44,
+               minimap, ocr, paths, rules, schema, sources, state as state_mod, store,
                video)
 
 
@@ -98,6 +98,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
           f"{economy['calculableCount']}条参考公式可估算、"
           f"{economy['conflictCount']}条与现有规则冲突并已隔离。")
     print("    来源为非官方实测文档，不用于硬性合法性校验或训练真值。")
+
+    knowledge = knowledge_s44.payload()
+    print(f"通识参考库：{knowledge['entryCount']}条，其中"
+          f"{knowledge['termCount']}条术语可用于人工标注归一化、"
+          f"{knowledge['overgeneralizedCount']}条绝对说法已降级、"
+          f"{knowledge['volatileCount']}条版本快照已隔离。")
+    print("    来源为个人总结；没有任何条目直接进入模型特征或训练真值。")
 
     print()
     profiles = hud.load_profiles(data_dir)

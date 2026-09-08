@@ -19,8 +19,8 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import (__version__, annotate, check, economy_s44, evaluate, hud, minimap,
-               ocr, paths, rules, samples, schema, season_s44, sources,
+from . import (__version__, annotate, check, economy_s44, evaluate, hud, knowledge_s44,
+               minimap, ocr, paths, rules, samples, schema, season_s44, sources,
                state as state_mod, store, video)
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -122,6 +122,7 @@ def api_status() -> dict[str, Any]:
         "sampleTypes": samples.public_types(),
         "seasonRules": season_s44.payload(),
         "economyRules": economy_s44.payload(),
+        "generalKnowledge": knowledge_s44.payload(),
     }
 
 

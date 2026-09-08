@@ -275,6 +275,15 @@
 </div>
 
 <div class="card">
+  <h2>S44 王者荣耀通识参考库 <span class="pill" id="knowledgeBadge">个人总结</span></h2>
+  <p class="hint" id="knowledgeSummary">正在读取通识资料…</p>
+  <div class="note">术语可以帮助统一人工标注名称；角色判断只是多证据提示。英雄榜、装备和召唤师技能属于版本快照。
+所有内容都禁止作为硬性校验、模型标签或训练真值。</div>
+  <div id="knowledgeWarnings"></div>
+  <div id="knowledgeGroups"></div>
+</div>
+
+<div class="card">
   <h2>用于自动校验的核心常量</h2>
   <p class="hint">
     S44中有明确整数的规则已自动接入；未由本批信息覆盖的项目继续标为“待核对”。
@@ -677,6 +686,31 @@ async function refresh() {
         <span class="pill ${entry.estimateAllowed ? 'on' : entry.status === 'conflict' ? 'off' : ''}">${safe(entry.statusLabel)}</span>
         <p>${safe(entry.summary)}</p>
         <p>来源页：${(entry.sourcePages || []).join('、') || '—'}；硬性校验：禁止</p>
+        ${entry.note ? `<p class="warn">注意：${safe(entry.note)}</p>` : ''}
+      </div>`).join('')}
+    </details>`).join('');
+
+  const knowledge = STATUS.generalKnowledge || {entries:[]};
+  $('knowledgeBadge').textContent = knowledge.official === false ? '非官方个人总结' : '来源未知';
+  $('knowledgeSummary').textContent = knowledge.entries ?
+    `已收录 ${knowledge.entryCount} 条：${knowledge.termCount} 条术语可辅助人工标注，` +
+    `${knowledge.overgeneralizedCount} 条绝对说法已降级，${knowledge.volatileCount} 条版本快照已隔离；模型启用 0 条。` :
+    '没有通识资料。';
+  const generalWarnings = (knowledge.entries || []).filter(entry =>
+    entry.status === 'overgeneralized' || entry.status === 'ambiguous');
+  $('knowledgeWarnings').innerHTML = generalWarnings.length ? `
+    <div class="msg warn" style="display:block"><b>以下内容不能作为硬规则：</b>\n` +
+      generalWarnings.map(entry => `• ${safe(entry.title)}：${safe(entry.note)}`).join('\n') + '</div>' : '';
+  const knowledgeGrouped = {};
+  for (const entry of knowledge.entries || []) (knowledgeGrouped[entry.category] ||= []).push(entry);
+  $('knowledgeGroups').innerHTML = Object.entries(knowledgeGrouped).map(([category, entries]) => `
+    <details class="season-group">
+      <summary>${safe(category)}（${entries.length}条）</summary>
+      ${entries.map(entry => `<div class="season-rule">
+        <b>${safe(entry.title)}</b>
+        <span class="pill ${entry.annotationAliasAllowed ? 'on' : entry.status === 'overgeneralized' ? 'off' : ''}">${safe(entry.statusLabel)}</span>
+        <p>${safe(entry.summary)}</p>
+        <p>来源页：${(entry.sourcePages || []).join('、') || '—'}；训练/模型：禁止</p>
         ${entry.note ? `<p class="warn">注意：${safe(entry.note)}</p>` : ''}
       </div>`).join('')}
     </details>`).join('');
