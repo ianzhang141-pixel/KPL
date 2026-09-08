@@ -130,6 +130,10 @@ def _check_rules(built: dict[str, Any], report: dict[str, Any], rules_table: dic
     max_level = int(rules.value(rules_table, "maxLevel"))
     tyrant_at = float(rules.value(rules_table, "tyrantFirstSpawnSec"))
     overlord_at = float(rules.value(rules_table, "overlordFirstSpawnSec"))
+    dark_tyrant_at = float(rules.value(rules_table, "darkTyrantFromSec"))
+    shadow_overlord_at = float(rules.value(rules_table, "shadowOverlordFromSec"))
+    storm_dragon_at = float(rules.value(rules_table, "stormDragonFromSec"))
+    buff_at = float(rules.value(rules_table, "buffFirstSpawnSec"))
 
     violations: list[dict[str, Any]] = []
     for frame in built["frames"]:
@@ -143,6 +147,15 @@ def _check_rules(built: dict[str, Any], report: dict[str, Any], rules_table: dic
                 violations.append({"clock": frame["clock"], "what": f"{side} 在暴君刷新（{tyrant_at:.0f}s）前就有暴君击杀"})
             if schema.get(team["overlords"], 0) > 0 and at < overlord_at:
                 violations.append({"clock": frame["clock"], "what": f"{side} 在主宰刷新（{overlord_at:.0f}s）前就有主宰击杀"})
+            if schema.get(team["darkTyrants"], 0) > 0 and at < dark_tyrant_at:
+                violations.append({"clock": frame["clock"], "what": f"{side} 在暗影暴君出现（{dark_tyrant_at:.0f}s）前就有击杀"})
+            if schema.get(team["prophetOverlords"], 0) > 0 and at < shadow_overlord_at:
+                violations.append({"clock": frame["clock"], "what": f"{side} 在暗影主宰出现（{shadow_overlord_at:.0f}s）前就有击杀"})
+            if schema.get(team["stormDragons"], 0) > 0 and at < storm_dragon_at:
+                violations.append({"clock": frame["clock"], "what": f"{side} 在风暴龙王出现（{storm_dragon_at:.0f}s）前就有击杀"})
+            if (schema.get(team["redBuffs"], 0) > 0 or
+                    schema.get(team["blueBuffs"], 0) > 0) and at < buff_at:
+                violations.append({"clock": frame["clock"], "what": f"{side} 在红蓝石像出现（{buff_at:.0f}s）前就有击杀"})
         for player in frame["players"]:
             level = schema.get(player["level"])
             if level is not None and not (1 <= level <= max_level):

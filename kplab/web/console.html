@@ -77,6 +77,12 @@
   .queue td:first-child { max-width:360px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .status-running { color:#93c5fd; } .status-done { color:#86efac; }
   .status-error { color:#fca5a5; }
+  .season-group { margin-top:9px; border:1px solid #232935; border-radius:8px;
+                  background:#0f1216; padding:0 12px; }
+  .season-group summary { padding:10px 0; color:#e6e9ef; font-weight:600; }
+  .season-rule { padding:9px 0; border-top:1px solid #232935; }
+  .season-rule b { font-size:13px; }
+  .season-rule p { margin:2px 0 0; color:#9aa3b2; font-size:12px; }
 </style>
 
 <h1>王者荣耀决策实验室 · 数据控制台</h1>
@@ -131,7 +137,7 @@
       <option value="other">其他录像</option>
     </select></div>
     <div style="max-width:130px"><label>初始训练权重</label><input type="number" id="trainingWeight" value="1.5" min="0.1" max="5" step="0.1"></div>
-    <div><label>游戏版本</label><input type="text" id="gamePatch" placeholder="例如 S40 / 具体版本号"></div>
+    <div><label>游戏版本</label><input type="text" id="gamePatch" value="S44" placeholder="例如 S44 / 具体版本号"></div>
     <div><label>批次名称（可留空）</label><input type="text" id="batchPrefix" placeholder="例如 KPL2026S1_AG"></div>
   </div>
   <div class="row">
@@ -213,11 +219,18 @@
 </div>
 
 <div class="card">
-  <h2>核对游戏常量</h2>
+  <h2>S44 赛季规则库 <span class="pill on" id="seasonBadge">用户已核对</span></h2>
+  <p class="hint" id="seasonSummary">正在读取当前赛季规则…</p>
+  <div class="note">“用户已核对”表示已按你提供的内容入库，不代表已用官方公告二次核验。
+存在歧义或缺少具体数值的条目只保存原意，不会参与自动计算。</div>
+  <div id="seasonRuleGroups"></div>
+</div>
+
+<div class="card">
+  <h2>用于自动校验的核心常量</h2>
   <p class="hint">
-    这些是<b>凭印象写的默认值，不是查证过的事实</b>。版本更新会改动它们，
-    而错的常量会让完整性检查的上限校验一起失效。
-    对着游戏确认一条，就点一次「确认」。
+    S44中有明确整数的规则已自动接入；未由本批信息覆盖的项目继续标为“待核对”。
+    这些数值会直接用于发现不可能的识别结果。
   </p>
   <table>
     <thead><tr><th>常量</th><th style="width:110px">值</th><th style="width:90px">状态</th><th></th></tr></thead>
@@ -503,6 +516,24 @@ async function refresh() {
     ? `<span class="pill off">${r.unverifiedCount} 条待核对</span> 见页面最下方。`
     : `<span class="pill on">已全部核对</span>`;
   $('s2').className = 'step ' + (r.unverifiedCount ? '' : 'done');
+
+  const season = STATUS.seasonRules || {rules:[]};
+  $('seasonBadge').textContent = season.label || '未加载';
+  $('seasonSummary').textContent = season.rules ?
+    `已收录 ${season.ruleCount} 条；${season.machineActiveCount} 条可计算，` +
+    `${season.needsReviewCount} 条因歧义或数值不完整仅作记录。` : '没有赛季规则。';
+  const grouped = {};
+  for (const entry of season.rules || []) (grouped[entry.category] ||= []).push(entry);
+  $('seasonRuleGroups').innerHTML = Object.entries(grouped).map(([category, entries], groupIndex) => `
+    <details class="season-group" ${groupIndex < 4 ? 'open' : ''}>
+      <summary>${safe(category)}（${entries.length}条）</summary>
+      ${entries.map(entry => `<div class="season-rule">
+        <b>${safe(entry.title)}</b>
+        <span class="pill ${entry.machineActive ? 'on' : 'off'}">${safe(entry.statusLabel)}</span>
+        <p>${safe(entry.summary)}</p>
+        ${entry.note ? `<p class="warn">注意：${safe(entry.note)}</p>` : ''}
+      </div>`).join('')}
+    </details>`).join('');
 
   const profiles = Object.entries(STATUS.profiles || {});
   $('envHud').innerHTML = profiles.map(([k, p]) =>

@@ -16,7 +16,8 @@ LOL 项目里有一个明确的 bug：先锋（RIFTHERALD）和虚空幼虫（HO
 暴君几分几秒刷新、主宰什么时候变成风暴龙王、每路有几座塔 —— 这些数字
 **每个赛季都可能调整**，写代码的人（包括 AI）凭记忆写下来的很可能是过时的。
 
-所以这里的每一条都带 `verified` 标记，默认 `False`，意思是
+所以这里的每一条都带 `verified` 标记。用户已提供的S44明确数值标为 `True`，
+没有被本次信息覆盖的旧默认值仍为 `False`，意思是
 **「这是待核对的默认值，不是已确认的事实」**。
 `kplab check` 会在报告顶部提醒还有多少条没核对。
 用户核对后可以写进 data/kpl/rules_override.json 覆盖，不用改代码。
@@ -65,9 +66,9 @@ NEUTRAL_OBJECTIVES = {
     },
     "DARK_TYRANT": {
         "key": "darkTyrants",
-        "label": "黑暗暴君",
+        "label": "暗影暴君",
         "lane": "下路河道",
-        "note": "暴君的后期强化形态，收益与暴君不同，必须分开计。",
+        "note": "S44于10分钟出现，收益与暴君不同，必须分开计。",
     },
     "OVERLORD": {
         "key": "overlords",
@@ -83,9 +84,9 @@ NEUTRAL_OBJECTIVES = {
     },
     "PROPHET_OVERLORD": {
         "key": "prophetOverlords",
-        "label": "先知主宰",
+        "label": "暗影主宰",
         "lane": "上路河道",
-        "note": "主宰的强化形态。是否在当前版本存在，待核对。",
+        "note": "S44于10分钟出现；字段名保留旧称以兼容已有数据。",
     },
 }
 
@@ -94,32 +95,66 @@ BUFFS = {
     "BLUE_BUFF": {"key": "blueBuffs", "label": "蓝BUFF"},
 }
 
-# ---------------------------------------------------------------- 待核对常量
+# ---------------------------------------------------------------- 可计算核心常量
+
+CURRENT_SEASON = "S44"
+USER_RULE_SOURCE = "用户提供于 2026-09-08"
+
 
 def _pending(value: Any, what: str, why: str = "") -> dict[str, Any]:
     """一条还没被人核对过的常量。"""
     return {"value": value, "verified": False, "what": what, "why": why}
 
 
-# 每一条的 value 都是「凭印象写的默认值」，不是查证过的事实。
-# 用户在网页上核对后，会写进 rules_override.json，届时 verified 变 True。
+def _confirmed(value: Any, what: str, why: str = "") -> dict[str, Any]:
+    """用户明确提供的当前赛季常量；不等同于外部官方来源复核。"""
+    return {"value": value, "verified": True, "what": what, "why": why,
+            "season": CURRENT_SEASON, "by": USER_RULE_SOURCE}
+
+
+# S44中由用户明确提供的整数已标记为用户核对；其余仍是待核对默认值。
+# 网页再次核对会写进 rules_override.json，不用修改源码。
 DEFAULTS: dict[str, dict[str, Any]] = {
     "towersPerLane": _pending(
         2, "每条路的外塔数量（一塔 + 二塔）",
         "check 会用它判断「塔数」的上限，写错了就检测不出 OCR 把 6 看成 8",
     ),
     "highGroundTowers": _pending(3, "高地塔数量", "同上，用于上限校验"),
-    "laneCount": _pending(3, "分路数量", ""),
-    "tyrantFirstSpawnSec": _pending(
-        120, "暴君首次刷新时间（秒）",
+    "laneCount": _confirmed(3, "分路数量", "三路兵线组成已由用户提供"),
+    "tyrantFirstSpawnSec": _confirmed(
+        240, "暴君首次刷新时间（秒）",
         "用于判断「0 分 30 秒就出现暴君击杀」这种明显不可能的识别结果",
     ),
-    "overlordFirstSpawnSec": _pending(480, "主宰首次刷新时间（秒）", "同上"),
-    "darkTyrantFromSec": _pending(600, "暴君变为黑暗暴君的时间（秒）", "同上"),
-    "stormDragonFromSec": _pending(
-        900, "主宰变为风暴龙王的时间（秒）",
-        "这一条我最没把握，版本改动频繁，务必核对",
+    "tyrantRespawnSec": _confirmed(210, "暴君重生间隔（秒）"),
+    "overlordFirstSpawnSec": _confirmed(240, "主宰首次刷新时间（秒）", "同上"),
+    "overlordRespawnSec": _confirmed(240, "主宰重生间隔（秒）"),
+    "darkTyrantFromSec": _confirmed(600, "暗影暴君首次出现时间（秒）", "同上"),
+    "darkTyrantRespawnSec": _confirmed(210, "暗影暴君重生间隔（秒）"),
+    "shadowOverlordFromSec": _confirmed(600, "暗影主宰首次出现时间（秒）"),
+    "shadowOverlordRespawnSec": _confirmed(210, "暗影主宰重生间隔（秒）"),
+    "stormDragonFromSec": _confirmed(
+        1200, "风暴龙王首次出现时间（秒）",
+        "S44为20分钟，不能沿用旧版本的15分钟值",
     ),
+    "stormDragonRespawnSec": _confirmed(180, "风暴龙王重生间隔（秒）"),
+    "primalBondDurationSec": _confirmed(90, "原初羁绊持续时间（秒）"),
+    "primalBondObjectiveDamageReductionPct": _confirmed(50, "原初羁绊对龙伤害降低（%）"),
+    "minionFirstSpawnSec": _confirmed(10, "首波兵线登场时间（秒）"),
+    "minionWaveRespawnSec": _confirmed(33, "每波兵线刷新间隔（秒）"),
+    "crossbowMinionFromSec": _confirmed(240, "弩车加入兵线时间（秒）"),
+    "cannonMinionFromSec": _confirmed(600, "炮车加入兵线时间（秒）"),
+    "minionSpeedupFromSec": _confirmed(600, "兵线开始加速时间（秒）"),
+    "jungleProtectionEndSec": _confirmed(240, "野区保护结束时间（秒）"),
+    "jungleProtectionDamageReductionPct": _confirmed(15, "野区保护伤害降低（%）"),
+    "towerEarlyProtectionEndSec": _confirmed(240, "一塔前期保护结束时间（秒）"),
+    "towerEarlyDamageReductionPct": _confirmed(40, "一塔前期受到伤害额外降低（%）"),
+    "buffFirstSpawnSec": _confirmed(30, "红蓝石像首次出现时间（秒）"),
+    "buffRespawnSec": _confirmed(90, "红蓝石像重生间隔（秒）"),
+    "buffDurationSec": _confirmed(70, "红蓝石像增益持续时间（秒）"),
+    "primordialSpiritFirstSpawnSec": _confirmed(60, "空间之灵首次出现时间（秒）"),
+    "primordialSpiritRespawnSec": _confirmed(60, "空间之灵刷新间隔（秒）"),
+    "primordialSpiritEndSec": _confirmed(240, "空间之灵停止刷新时间（秒）"),
+    "primordialPortalEndSec": _confirmed(600, "原初法阵消失时间（秒）"),
     "typicalGameSec": _pending(
         1200, "一局的典型时长（秒）",
         "只用于进度条和异常提示，不参与任何计算",
@@ -192,7 +227,8 @@ def save_override(data_dir: Path, key: str, val: Any, by: str = "") -> Path:
                 current = loaded
         except (OSError, ValueError, UnicodeDecodeError):
             current = {}
-    entry: dict[str, Any] = {"value": val, "verified": True}
+    entry: dict[str, Any] = {"value": val, "verified": True,
+                             "season": CURRENT_SEASON}
     if by:
         entry["by"] = by
     current[key] = entry

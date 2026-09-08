@@ -284,6 +284,7 @@ def build(
             "frameIntervalSec": _guess_interval(ordered),
             "durationSec": round(float(ordered[-1].get("atSec") or 0.0), 2) if ordered else 0,
             "blueWin": meta.get("blueWin"),   # 训练标签，不属于 State 特征
+            "ruleSeason": rules.CURRENT_SEASON,
             "rulesVerified": not rules.unverified(rules_table),
             "unverifiedRules": rules.unverified(rules_table),
             "builtBy": "kplab.state.build",

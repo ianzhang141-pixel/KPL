@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from kplab import annotate, evaluate, ocr, paths, rules, samples, schema, state, store, video  # noqa: E402
+from kplab import annotate, check, evaluate, ocr, paths, rules, samples, schema, season_s44, state, store, video  # noqa: E402
 
 
 def ocr_field(value, confidence=0.9):
@@ -262,12 +262,17 @@ class EvaluationHonesty(unittest.TestCase):
 
 
 class RulesAreMarkedUnverified(unittest.TestCase):
-    """游戏常量默认必须是「待核对」，不能冒充查证过的事实。"""
+    """已提供的S44常量和仍未知的常量必须明确分开。"""
 
-    def test_defaults_start_unverified(self):
+    def test_only_user_provided_s44_values_are_confirmed(self):
         table = rules.load()
-        self.assertEqual(len(rules.unverified(table)), len(table),
-                         "凭印象写的默认值不许标成已核对")
+        self.assertEqual(rules.value(table, "tyrantFirstSpawnSec"), 240)
+        self.assertEqual(rules.value(table, "overlordFirstSpawnSec"), 240)
+        self.assertEqual(rules.value(table, "stormDragonFromSec"), 1200)
+        self.assertTrue(table["tyrantFirstSpawnSec"]["verified"])
+        self.assertEqual(table["tyrantFirstSpawnSec"]["season"], "S44")
+        self.assertIn("maxLevel", rules.unverified(table),
+                      "用户没有在本批信息中确认最高等级，不能顺手标成已核对")
 
     def test_override_marks_verified(self):
         directory = Path(tempfile.mkdtemp())
@@ -275,6 +280,37 @@ class RulesAreMarkedUnverified(unittest.TestCase):
         table = rules.load(directory)
         self.assertTrue(table["towersPerLane"]["verified"])
         self.assertNotIn("towersPerLane", rules.unverified(table))
+
+    def test_s44_knowledge_keeps_ambiguities_out_of_calculation(self):
+        payload = season_s44.payload()
+        self.assertEqual(payload["season"], "S44")
+        self.assertFalse(payload["externalVerified"])
+        ambiguous = {entry["id"]: entry for entry in payload["rules"]
+                     if not entry["machineActive"]}
+        ids = [entry["id"] for entry in payload["rules"]]
+        self.assertEqual(len(ids), len(set(ids)), "赛季规则编号重复会导致覆盖或错误引用")
+        self.assertIn("minion_speed", ambiguous)
+        self.assertIn("red_falcon", ambiguous)
+        self.assertGreater(payload["machineActiveCount"], 15)
+
+    def test_s44_spawn_times_reject_impossible_early_kills(self):
+        with tempfile.TemporaryDirectory() as raw:
+            data_dir = Path(raw)
+            store.create_game(data_dir, "S44_BAD", {})
+            for observation in (
+                {"atSec": 20, "fields": {},
+                 "events": [{"type": "RED_BUFF_KILL", "teamId": 100}]},
+                {"atSec": 500, "fields": {},
+                 "events": [{"type": "DARK_TYRANT_KILL", "teamId": 100}]},
+                {"atSec": 1100, "fields": {},
+                 "events": [{"type": "STORM_DRAGON_KILL", "teamId": 200}]},
+            ):
+                store.append_jsonl_gz(store.observations_path(data_dir, "S44_BAD"), observation)
+            report = check.run(data_dir, "S44_BAD")
+            descriptions = " ".join(item["what"] for item in report["ruleViolations"])
+            self.assertIn("红蓝石像", descriptions)
+            self.assertIn("暗影暴君", descriptions)
+            self.assertIn("风暴龙王", descriptions)
 
 
 class DataDirectoryDiscovery(unittest.TestCase):
