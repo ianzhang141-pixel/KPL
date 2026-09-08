@@ -52,11 +52,18 @@
              white-space:pre-wrap; }
   .ev { display:flex; gap:6px; margin-bottom:6px; }
   .ev select { flex:2; } .ev button { flex:0; }
-  .mini { position:relative; display:inline-block; width:100%; max-width:260px; }
-  .mini img { width:100%; border-radius:6px; border:1px solid #2f3644; }
-  .dot { position:absolute; width:12px; height:12px; border-radius:50%;
-         transform:translate(-50%,-50%); border:2px solid #0f1216; font-size:8px;
-         text-align:center; line-height:9px; color:#fff; font-weight:700; }
+  .mini { position:relative; width:100%; max-width:300px; aspect-ratio:1;
+          background:#12161d; border:1px solid #2f3644; border-radius:8px;
+          cursor:crosshair; overflow:hidden; margin:0 auto; }
+  .mini svg { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+  .dot { position:absolute; width:17px; height:17px; border-radius:50%;
+         transform:translate(-50%,-50%); border:2px solid #0f1216; font-size:9px;
+         text-align:center; line-height:14px; color:#fff; font-weight:700;
+         pointer-events:none; }
+  .dot.act { box-shadow:0 0 0 3px rgba(122,167,255,.55); }
+  .region { text-align:center; font-size:12px; color:#8b93a1; margin-top:7px; min-height:18px; }
+  .region b { color:#e6e9ef; }
+  .miniwrap { margin-top:10px; }
 </style>
 
 <h1>标注 · <span id="gameName">—</span></h1>
@@ -119,14 +126,21 @@ LOL 那个项目就是把先锋和幼虫算进了大龙，训出来的模型是�
     <div class="card" style="margin-top:14px">
       <h2>十名选手</h2>
       <p class="tip" style="margin-top:0">
-位置那两栏是小地图坐标（0~1 的相对值）。
-<b>在上面的画面里点一下小地图上的英雄</b>，会自动填进当前选中的那一行。
+<b>「位置」这一栏不用打字。</b> 先点左边的行选中一个人，
+再到下面那张小地图上点一下他所在的位置就行 —— 点完会自动跳到下一个人。
+
+看不清谁在哪就<b>跳过</b>，位置不是必填的。
+（也可以直接在上方的比赛画面里点小地图上的英雄，效果一样。）
       </p>
+      <div class="miniwrap">
+        <div class="mini" id="mini"><svg id="miniSvg" viewBox="0 0 100 100"></svg></div>
+        <div class="region" id="regionText">点行选人，再点地图定位</div>
+      </div>
       <table>
         <thead><tr><th style="width:30px"></th><th>英雄</th><th>分路</th>
           <th style="width:52px">等级</th><th style="width:44px">K</th>
           <th style="width:44px">D</th><th style="width:44px">A</th>
-          <th style="width:60px">x</th><th style="width:60px">y</th></tr></thead>
+          <th style="width:96px">位置</th></tr></thead>
         <tbody id="players"></tbody>
       </table>
     </div>
@@ -152,6 +166,94 @@ const EVENTS = [
   ['RECALL','回城'],
 ];
 let FRAMES = [], CURRENT = null, ACTIVE_SLOT = 1, GAME = '';
+let MINIMAP_BOX = null;   // 标定过的小地图区域，用来把画面坐标换算成地图坐标
+
+// 王者峡谷示意图。**这是示意，不是等比复刻** ——
+// 只画确定无疑的结构：双方基地在对角、三条路、中间一条河道。
+// 目的是让人能对着它点位置，不是当地图查资料用。
+function drawMap() {
+  // 王者峡谷示意图。**是示意，不是等比复刻。**
+  // 只画确定无疑的结构：双方基地在对角、三条路各自连通两座基地、河道横穿三路。
+  //
+  // 前两版都画错了：第一版河道和中路平行（河道本该横穿三路），
+  // 第二版路线段叠成一团看不出是三条路。现在改成三条清晰的折线。
+  const g = [];
+  const BLUE = [11, 89], RED = [89, 11];
+
+  // 河道：与中路垂直的一条带，从左上到右下
+  g.push(`<polygon points="0,30 30,0 100,70 70,100" fill="#1b2733" opacity=".9"/>`);
+
+  // 三条路。每条都从蓝方基地通到红方基地：
+  //   对抗路走左边 + 上边，中路走正对角，发育路走下边 + 右边。
+  const path = (d, w) => `<path d="${d}" fill="none" stroke="#333d4d" stroke-width="${w}"
+    stroke-linecap="round" stroke-linejoin="round"/>`;
+  g.push(path(`M ${BLUE[0]} ${BLUE[1]} L 11 22 L 22 11 L ${RED[0]} ${RED[1]}`, 7));   // 对抗路
+  g.push(path(`M ${BLUE[0]} ${BLUE[1]} L ${RED[0]} ${RED[1]}`, 7));                    // 中路
+  g.push(path(`M ${BLUE[0]} ${BLUE[1]} L 22 89 L 89 78 L ${RED[0]} ${RED[1]}`, 7));   // 发育路
+
+  // 基地
+  g.push(`<circle cx="${BLUE[0]}" cy="${BLUE[1]}" r="9" fill="#1e3a5f" stroke="#3b82f6" stroke-width="1.6"/>`);
+  g.push(`<circle cx="${RED[0]}" cy="${RED[1]}" r="9" fill="#3f1d1d" stroke="#ef4444" stroke-width="1.6"/>`);
+  g.push(`<text x="${BLUE[0]}" y="${BLUE[1]+2.2}" text-anchor="middle" fill="#7aa7ff" font-size="6">蓝</text>`);
+  g.push(`<text x="${RED[0]}" y="${RED[1]+2.2}" text-anchor="middle" fill="#fca5a5" font-size="6">红</text>`);
+
+  // 两个大资源坑落在河道上：主宰在上路侧，暴君在下路侧
+  const pit = (x, y, label, colour) =>
+    `<circle cx="${x}" cy="${y}" r="6" fill="#12161d" stroke="${colour}" stroke-width="1.3"/>
+     <text x="${x}" y="${y+1.8}" text-anchor="middle" fill="${colour}" font-size="4.8">${label}</text>`;
+  g.push(pit(33, 29, '主宰', '#a78bfa'));
+  g.push(pit(67, 71, '暴君', '#f59e0b'));
+
+  // 路名，放在各自路线的空白处
+  g.push(`<text x="55" y="8" text-anchor="middle" fill="#6b7383" font-size="4.6">对抗路</text>`);
+  g.push(`<text x="53" y="47" text-anchor="middle" fill="#6b7383" font-size="4.6">中路</text>`);
+  g.push(`<text x="47" y="95" text-anchor="middle" fill="#6b7383" font-size="4.6">发育路</text>`);
+  g.push(`<text x="8" y="17" fill="#4a5261" font-size="4">河道</text>`);
+  $('miniSvg').innerHTML = g.join('');
+}
+
+// 把坐标说成人话。给用户一个「填对了没有」的即时反馈 ——
+// 光看 0.42 / 0.61 两个数字，没人能判断自己点没点错。
+function regionName(x, y) {
+  const nearBlue = Math.hypot(x-0.07, y-0.93) < 0.18;
+  const nearRed  = Math.hypot(x-0.93, y-0.07) < 0.18;
+  if (nearBlue) return '蓝方基地';
+  if (nearRed)  return '红方基地';
+  // 到主对角线（左下-右上）的距离，判断是不是在河道附近
+  const d = Math.abs(x + y - 1) / Math.SQRT2;
+  const half = (x + y) < 1 ? '上半区（对抗路侧）' : '下半区（发育路侧）';
+  if (d < 0.09) return '中路 / 河道一带';
+  // 另一条对角线判断偏哪一方
+  const side = (y - x) > 0 ? '蓝方半区' : '红方半区';
+  return `${side} · ${half}`;
+}
+
+function setPos(slot, x, y) {
+  $('x'+slot).value = x.toFixed(3);
+  $('y'+slot).value = y.toFixed(3);
+  $('pos'+slot).textContent = regionName(x, y);
+  $('pos'+slot).style.color = '#c6ccd8';
+  renderDots();
+  $('regionText').innerHTML =
+    `${slot<=5?'蓝':'红'}${(slot-1)%5+1} → <b>${regionName(x,y)}</b>` +
+    `<span style="color:#5b6373">　(${x.toFixed(2)}, ${y.toFixed(2)})</span>`;
+}
+
+function renderDots() {
+  const mini = $('mini');
+  mini.querySelectorAll('.dot').forEach(d => d.remove());
+  for (let s = 1; s <= 10; s++) {
+    const x = $('x'+s).value, y = $('y'+s).value;
+    if (x === '' || y === '') continue;
+    const d = document.createElement('div');
+    d.className = 'dot' + (s === ACTIVE_SLOT ? ' act' : '');
+    d.style.left = (parseFloat(x)*100) + '%';
+    d.style.top = (parseFloat(y)*100) + '%';
+    d.style.background = s <= 5 ? '#3b82f6' : '#ef4444';
+    d.textContent = (s-1)%5+1;
+    mini.appendChild(d);
+  }
+}
 
 function qs(k) { return new URLSearchParams(location.search).get(k) || ''; }
 async function api(path, body) {
@@ -187,8 +289,8 @@ function buildPlayers() {
       <td><input type="number" id="k${slot}"></td>
       <td><input type="number" id="d${slot}"></td>
       <td><input type="number" id="a${slot}"></td>
-      <td><input type="number" step="0.001" id="x${slot}"></td>
-      <td><input type="number" step="0.001" id="y${slot}"></td>
+      <td><span class="posCell" id="pos${slot}" style="color:#5b6373">—</span>
+        <input type="hidden" id="x${slot}"><input type="hidden" id="y${slot}"></td>
     </tr>`;
   }).join('');
   markActive();
@@ -199,17 +301,45 @@ function markActive() {
     el.style.fontWeight = s === ACTIVE_SLOT ? '700' : '400';
     el.style.color = s === ACTIVE_SLOT ? '#7aa7ff' : '';
   }
+  if (document.getElementById('mini')) renderDots();
 }
 
+// 点小地图控件 → 直接就是地图坐标，不需要换算
+$('mini').addEventListener('click', ev => {
+  const r = $('mini').getBoundingClientRect();
+  const x = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width));
+  const y = Math.min(1, Math.max(0, (ev.clientY - r.top) / r.height));
+  setPos(ACTIVE_SLOT, x, y);
+  if (ACTIVE_SLOT < 10) { ACTIVE_SLOT++; markActive(); renderDots(); }
+});
+
+// 点比赛画面上的小地图 → 必须先换算成「相对小地图」的坐标。
+//
+// 这里原来有个 bug：直接存了相对整幅画面的比例。
+// 但下游（核对页的小地图、minimap.py 的输出）全都按「相对小地图」解释，
+// 两边对不上 —— 画面里小地图在左下角，点中间的英雄会得到 x≈0.05，
+// 当成地图坐标就跑到最左边去了。
 $('frameImg').addEventListener('click', ev => {
-  // 点画面上的小地图 → 把相对坐标填进当前行。
-  // 存的是相对整幅画面的比例，和 HUD 标定用的是同一套坐标系。
   const rect = ev.target.getBoundingClientRect();
-  const x = (ev.clientX - rect.left) / rect.width;
-  const y = (ev.clientY - rect.top) / rect.height;
-  $('x' + ACTIVE_SLOT).value = x.toFixed(3);
-  $('y' + ACTIVE_SLOT).value = y.toFixed(3);
-  if (ACTIVE_SLOT < 10) { ACTIVE_SLOT++; markActive(); }
+  const fx = (ev.clientX - rect.left) / rect.width;
+  const fy = (ev.clientY - rect.top) / rect.height;
+
+  if (!MINIMAP_BOX) {
+    $('saveMsg').className = 'msg err';
+    $('saveMsg').textContent =
+      '还没有标定小地图在画面的哪个位置，没法把点击换算成地图坐标。\n' +
+      '要么先去「标定页」框一下小地图，要么直接用下面那张示意地图点。';
+    return;
+  }
+  const [bx, by, bw, bh] = MINIMAP_BOX;
+  if (fx < bx || fx > bx+bw || fy < by || fy > by+bh) {
+    $('saveMsg').className = 'msg err';
+    $('saveMsg').textContent = '点到小地图框外面了。请点画面里小地图那一块。';
+    return;
+  }
+  $('saveMsg').className = 'msg';  $('saveMsg').textContent = '';
+  setPos(ACTIVE_SLOT, (fx-bx)/bw, (fy-by)/bh);
+  if (ACTIVE_SLOT < 10) { ACTIVE_SLOT++; markActive(); renderDots(); }
 });
 
 function addEvent(type = '', team = '100') {
@@ -267,8 +397,12 @@ function pickFrame(i) {
 
 function clearForm() {
   ['blueGold','redGold','blueKills','redKills','blueTowers','redTowers'].forEach(k => $(k).value = '');
-  for (let s = 1; s <= 10; s++)
+  for (let s = 1; s <= 10; s++) {
     ['level','k','d','a','x','y'].forEach(f => $(f + s).value = '');
+    $('pos'+s).textContent = '—'; $('pos'+s).style.color = '#5b6373';
+  }
+  renderDots();
+  $('regionText').textContent = '点行选人，再点地图定位';
   $('events').innerHTML = '';
   ACTIVE_SLOT = 1; markActive();
 }
@@ -314,5 +448,14 @@ async function save() {
 }
 
 buildPlayers();
+drawMap();
 loadGames();
+
+// 取标定过的小地图区域，用于把画面点击换算成地图坐标
+(async () => {
+  const st = await api('/api/status');
+  const prof = (st.profiles || {})['kpl_broadcast'];
+  const box = (prof || {}).regions && prof.regions.minimap;
+  if (box && box.length === 4) MINIMAP_BOX = box;
+})();
 </script>
