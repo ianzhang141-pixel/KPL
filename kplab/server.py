@@ -479,7 +479,22 @@ def _source_batches_work(data_dir: Path, batches: list[dict[str, Any]]) -> Calla
             if not any(item.get("status") in {"PENDING", "RUNNING"}
                        for item in (batch.get("jobs") or []) if isinstance(item, dict)):
                 batch["finishedAt"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+                batch_jobs = [item for item in (batch.get("jobs") or []) if isinstance(item, dict)]
+                batch["result"] = {
+                    "done": sum(1 for item in batch_jobs if item.get("status") == "DONE"),
+                    "scoutDone": sum(1 for item in batch_jobs if item.get("status") == "SCOUT_DONE"),
+                    "failed": sum(1 for item in batch_jobs if item.get("status") == "FAILED"),
+                }
                 sources.save_batch(data_dir, batch)
+                parent_game_id = str(batch.get("parentGameId") or "")
+                if parent_game_id and store.valid_game_id(parent_game_id):
+                    failures = batch["result"]["failed"]
+                    store.create_game(data_dir, parent_game_id, {
+                        "analysisStatus": ("SEGMENT_EXTRACTION_COMPLETE" if failures == 0
+                                           else "SEGMENT_EXTRACTION_PARTIAL"),
+                        "segmentExtractionResult": batch["result"],
+                        "segmentExtractionFinishedAt": batch["finishedAt"],
+                    })
         log(f"录像任务完成：完整处理{completed}个，长录像侦察{scouted}个，失败{failed}个。")
 
     return work
