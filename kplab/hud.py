@@ -33,6 +33,10 @@ from typing import Any
 # 一个区域：(x, y, w, h)，全部是相对整幅画面的比例
 Box = tuple[float, float, float, float]
 
+PROFILE_FULL_SCOREBOARD = "full_scoreboard"
+PROFILE_PLAYER_POV = "player_pov"
+PROFILE_MODES = (PROFILE_FULL_SCOREBOARD, PROFILE_PLAYER_POV)
+
 
 def valid_box(box: Any) -> bool:
     if not isinstance(box, (list, tuple)) or len(box) != 4:
@@ -55,6 +59,16 @@ REGIONS: dict[str, dict[str, Any]] = {
     },
     "blueKills": {"label": "蓝方击杀数", "read": "int", "why": "比分板左侧"},
     "redKills": {"label": "红方击杀数", "read": "int", "why": "比分板右侧"},
+    "allyKills": {
+        "label": "己方击杀数",
+        "read": "int",
+        "why": "单人视角左侧比分；在阵营映射确认前不写成蓝方。",
+    },
+    "enemyKills": {
+        "label": "敌方击杀数",
+        "read": "int",
+        "why": "单人视角右侧比分；在阵营映射确认前不写成红方。",
+    },
     "blueGold": {
         "label": "蓝方总经济", "read": "int",
         "why": "可能显示成 2.3万 这种缩写，解析要处理「万」",
@@ -82,6 +96,7 @@ for _slot in range(1, 11):
 # 明确说明：这不是标定结果，是一个待修正的起点。所有值都可能是错的。
 KPL_BROADCAST: dict[str, Any] = {
     "name": "KPL 职业转播（未标定的起点）",
+    "mode": PROFILE_FULL_SCOREBOARD,
     "calibrated": False,
     "note": "内置的猜测值。必须在标定页上对着真实截图改过才能用。",
     "aspect": None,
@@ -151,9 +166,13 @@ def save_profile(data_dir: Path, name: str, profile: dict[str, Any]) -> Path:
         for key, box in (profile.get("regions") or {}).items()
         if key in REGIONS and valid_box(box)
     }
-    report = completeness(regions)
+    mode = str(profile.get("mode") or PROFILE_FULL_SCOREBOARD)
+    if mode not in PROFILE_MODES:
+        mode = PROFILE_FULL_SCOREBOARD
+    report = completeness(regions, mode)
     saved[name] = {
         "name": profile.get("name") or name,
+        "mode": mode,
         "calibrated": report["complete"],
         "note": profile.get("note") or "",
         "aspect": profile.get("aspect"),
@@ -166,14 +185,30 @@ def save_profile(data_dir: Path, name: str, profile: dict[str, Any]) -> Path:
 
 
 # 没有这几个区域，State 里就没有任何一个球队级别的数字，整场没有意义
-REQUIRED = ("clock", "blueKills", "redKills", "blueGold", "redGold")
+REQUIRED_BY_MODE = {
+    # 赛事转播的固定记分板应该同时提供时间、比分和团队经济。
+    PROFILE_FULL_SCOREBOARD: ("clock", "blueKills", "redKills", "blueGold", "redGold"),
+    # 单人视角通常不常驻显示双方总经济。经济必须留为 unknown，
+    # 不应因此拒绝读取确实可见的时间和比分。
+    PROFILE_PLAYER_POV: ("clock",),
+}
+
+# 保留原名供旧代码/外部调用者使用。
+REQUIRED = REQUIRED_BY_MODE[PROFILE_FULL_SCOREBOARD]
 
 
-def completeness(regions: dict[str, Any]) -> dict[str, Any]:
+def completeness(
+    regions: dict[str, Any], mode: str = PROFILE_FULL_SCOREBOARD
+) -> dict[str, Any]:
+    if mode not in PROFILE_MODES:
+        mode = PROFILE_FULL_SCOREBOARD
+    required = REQUIRED_BY_MODE[mode]
     have = {k for k, v in regions.items() if valid_box(v)}
-    missing_required = [k for k in REQUIRED if k not in have]
-    optional = [k for k in REGIONS if k not in REQUIRED]
+    missing_required = [k for k in required if k not in have]
+    optional = [k for k in REGIONS if k not in required]
     return {
+        "mode": mode,
+        "required": list(required),
         "complete": not missing_required,
         "missingRequired": missing_required,
         "haveCount": len(have),
@@ -188,7 +223,8 @@ def describe(profile: dict[str, Any] | None) -> dict[str, Any]:
     """给网页 / 命令行看的一句话状态。"""
     if not profile:
         return {"ok": False, "message": "没有这个标定档案。"}
-    report = completeness(profile.get("regions") or {})
+    mode = str(profile.get("mode") or PROFILE_FULL_SCOREBOARD)
+    report = completeness(profile.get("regions") or {}, mode)
     if not profile.get("calibrated"):
         return {
             "ok": False,

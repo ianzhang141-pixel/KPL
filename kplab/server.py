@@ -800,6 +800,7 @@ def api_save_profile(body: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": f"这些区域的坐标不合法：{'、'.join(bad)}。坐标必须是 0~1 的相对值。"}
     profile = {
         "name": body.get("label") or name,
+        "mode": body.get("mode") or hud.PROFILE_FULL_SCOREBOARD,
         "note": body.get("note") or "",
         "aspect": body.get("aspect"),
         "calibratedAt": time.strftime("%Y-%m-%d %H:%M:%S"),

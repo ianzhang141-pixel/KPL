@@ -69,6 +69,12 @@
         <div style="flex:2"><label>比赛</label><select id="gameSel"></select></div>
         <div style="flex:0"><button class="ghost sm" onclick="loadFrames()">刷新</button></div>
       </div>
+      <div class="row">
+        <div><label>画面类型</label><select id="profileMode">
+          <option value="player_pov">职业/顶尖选手单人视角</option>
+          <option value="full_scoreboard">赛事转播固定记分板</option>
+        </select></div>
+      </div>
       <div class="strip" id="strip"></div>
       <div class="stage" id="stage">
         <img id="img" alt="">
@@ -125,7 +131,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-let GAME='', FRAMES=[], CURRENT=null, REGIONS={}, ACTIVE=null, SPECS={}, LAST=null;
+let GAME='', FRAMES=[], CURRENT=null, REGIONS={}, ACTIVE=null, SPECS={}, LAST=null, PROFILES={};
 
 function qs(k){ return new URLSearchParams(location.search).get(k)||''; }
 async function api(p,b){ const o=b?{method:'POST',headers:{'Content-Type':'application/json'},
@@ -137,8 +143,8 @@ function msg(id,t,k='ok'){ const e=$(id); e.className='msg '+k; e.textContent=t;
 async function boot() {
   const st = await api('/api/status');
   SPECS = st.regionSpecs || {};
-  const prof = (st.profiles||{})['kpl_broadcast'];
-  REGIONS = Object.assign({}, (prof||{}).regions || {});
+  PROFILES = st.profiles || {};
+  loadProfileForMode();
   const mm = st.minimap || {};
   ['blueMinB','blueBOverR','blueBOverG','redMinR','redROverB','redROverG',
    'minBlobPixels','maxBlobPixels'].forEach(k => { if(mm[k]!==undefined) $(k).value = mm[k]; });
@@ -154,10 +160,19 @@ async function boot() {
   if (GAME) loadFrames();
 }
 $('gameSel').addEventListener('change', ()=>{ GAME=$('gameSel').value; loadFrames(); });
+$('profileMode').addEventListener('change', ()=>{
+  ACTIVE=null; LAST=null; loadProfileForMode(); renderRegions();
+});
+
+function profileName(){ return $('profileMode').value==='player_pov' ? 'player_pov' : 'kpl_broadcast'; }
+function loadProfileForMode(){
+  const prof = PROFILES[profileName()] || {};
+  REGIONS = Object.assign({}, prof.regions || {});
+}
 
 // 区域清单写死在前端，和 hud.REGIONS 对应。只列必需的 + 小地图，
 // 十个人的等级框太琐碎，第一遍标定不做，等 OCR 真跑起来了再说。
-const LIST = [
+const FULL_LIST = [
   ['clock','比赛计时','整条时间轴的锚点，这个错了所有帧都会错位'],
   ['blueGold','蓝方总经济','可能显示成 2.3万'],
   ['redGold','红方总经济',''],
@@ -165,8 +180,15 @@ const LIST = [
   ['redKills','红方击杀',''],
   ['minimap','小地图','十个人的位置。没有它就答不了「入侵值不值」'],
 ];
+const POV_LIST = [
+  ['clock','比赛计时','单人视角唯一强制项'],
+  ['allyKills','己方击杀','不会在未确认阵营时冒充蓝方'],
+  ['enemyKills','敌方击杀','不会在未确认阵营时冒充红方'],
+  ['minimap','小地图','十个人的位置，需要另外核对颜色阈值'],
+];
+function currentList(){ return $('profileMode').value==='player_pov' ? POV_LIST : FULL_LIST; }
 function renderRegions() {
-  $('regions').innerHTML = LIST.map(([k,label,why]) => {
+  $('regions').innerHTML = currentList().map(([k,label,why]) => {
     const has = REGIONS[k];
     return `<div class="ritem ${ACTIVE===k?'on':''} ${has?'done':''}" onclick="pickRegion('${k}')">
       <span>${has?'✓':'○'} ${label}${why?`<br><span style="color:#5b6373">${why}</span>`:''}</span>
@@ -175,7 +197,7 @@ function renderRegions() {
   drawOverlay();
 }
 function pickRegion(k){ ACTIVE=k; renderRegions();
-  $('hint').innerHTML = `正在标定：<b>${LIST.find(l=>l[0]===k)[1]}</b> —— 在图上拖一个框把它圈起来。`; }
+  $('hint').innerHTML = `正在标定：<b>${currentList().find(l=>l[0]===k)[1]}</b> —— 在图上拖一个框把它圈起来。`; }
 function clearOne(){ if(ACTIVE){ delete REGIONS[ACTIVE]; renderRegions(); } }
 
 async function loadFrames() {
@@ -223,7 +245,7 @@ window.addEventListener('mouseup', ()=>{
 function drawOverlay(){
   const parts=[];
   for(const [k,b] of Object.entries(REGIONS)){
-    const spec=LIST.find(l=>l[0]===k);
+    const spec=currentList().find(l=>l[0]===k);
     if(!spec) continue;
     parts.push(`<div class="box ${k==='minimap'?'mini':''}" style="left:${b[0]*100}%;top:${b[1]*100}%;
       width:${b[2]*100}%;height:${b[3]*100}%"><b>${spec[1]}</b></div>`);
@@ -239,9 +261,12 @@ function drawOverlay(){
 }
 
 async function saveProfile(){
-  const res = await api('/api/profile', {name:'kpl_broadcast', label:'KPL 职业转播',
+  const mode=$('profileMode').value;
+  const res = await api('/api/profile', {name:profileName(), mode,
+    label:mode==='player_pov'?'职业/顶尖选手单人视角':'KPL 赛事转播',
     note:'在标定页上对着真实画面标的', regions: REGIONS});
   if(!res.ok){ msg('saveMsg', res.error, 'err'); return; }
+  PROFILES[profileName()]=res.profile;
   msg('saveMsg', res.verdict.message, res.verdict.ok?'ok':'warn');
 }
 

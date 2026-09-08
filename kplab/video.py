@@ -730,9 +730,12 @@ def crop_region(
     crop = f"crop=iw*{w}:ih*{h}:iw*{x}:ih*{y}"
     if scale_width > 0:
         crop += f",scale={scale_width}:-2"
+    # OCR 传入的通常已经是单张 JPG/PNG。对单帧图片在输入前加
+    # ``-ss 0`` 时，某些 ffmpeg 版本会返回 0 却不产生输出文件。
+    # 只在真正需要跳转时才加 -ss，这样图片 OCR 和视频截帧都可用。
+    seek = ["-ss", f"{at_sec:.3f}"] if at_sec > 0 else []
     result = _run([
-        exe, "-nostdin", "-loglevel", "error",
-        "-ss", f"{at_sec:.3f}", "-i", str(video),
+        exe, "-nostdin", "-loglevel", "error", *seek, "-i", str(video),
         "-frames:v", "1", "-vf", crop, "-q:v", "2",
         "-y", str(out_file),
     ], timeout=120)
