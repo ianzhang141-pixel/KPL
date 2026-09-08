@@ -196,6 +196,7 @@
     <thead><tr><th></th><th>状态</th><th>平台</th><th>标题</th><th>时长</th><th>分P</th><th>重复</th></tr></thead>
     <tbody id="sourceRows"></tbody>
   </table>
+  <div id="sourceBatchSummary"></div>
   <pre class="log" id="sourceJobLog" style="display:none"></pre>
 </div>
 
@@ -418,6 +419,16 @@ async function startSourceBatch() {
   jobTimer = setInterval(pollJob, 900);
 }
 
+async function resumeSourceBatch(batchId, includeFailed=false) {
+  const result = await api('/api/source/resume', {batchId, includeFailed});
+  if (!result.started) { msg('sourceMsg', result.reason || '恢复失败。', 'err'); return; }
+  $('sourceJobLog').style.display = 'block';
+  msg('sourceMsg', includeFailed ? `正在重试批次 ${batchId}。` : `正在恢复批次 ${batchId}。`, 'ok');
+  if (jobTimer) clearInterval(jobTimer);
+  jobTimer = setInterval(pollJob, 900);
+  await pollJob();
+}
+
 function chooseVideos(files) {
   const selected = Array.from(files || []).slice(0, 100);
   if (!selected.length) return;
@@ -634,6 +645,21 @@ async function refresh() {
     ? `<span class="pill on">解析器已就绪</span> 实际访问取决于平台限制和所选浏览器的登录状态。`
     : `<span class="pill off">未安装</span> 直接 MP4/m3u8 可用；网页地址暂不能解析。`;
   $('sRemote').className = 'step ' + ((STATUS.sourceBatches || []).length ? 'done' : 'wait');
+  const sourceBatches = STATUS.sourceBatches || [];
+  $('sourceBatchSummary').innerHTML = sourceBatches.length ? `
+    <table class="queue"><thead><tr><th>录像批次</th><th>等待</th><th>处理中</th><th>完成</th><th>待分段</th><th>失败</th><th></th></tr></thead>
+    <tbody>${sourceBatches.map(batch => `<tr>
+      <td><code>${safe(batch.batchId)}</code></td><td>${batch.pending}</td><td>${batch.running}</td>
+      <td class="status-done">${batch.done}</td><td class="${batch.scoutDone ? 'status-running' : ''}">${batch.scoutDone || 0}</td><td class="${batch.failed ? 'status-error' : ''}">${batch.failed}</td>
+      <td>${batch.pending || batch.running ? `<button onclick="resumeSourceBatch('${safe(batch.batchId)}')">继续</button>` :
+        batch.failed ? `<button onclick="resumeSourceBatch('${safe(batch.batchId)}',true)">重试失败项</button>` : '已完成'}</td>
+    </tr>`).join('')}</tbody></table>` : '';
+  const sourceActive = sourceBatches.some(batch => batch.pending || batch.running);
+  if (sourceActive && !jobTimer) {
+    $('sourceJobLog').style.display = 'block';
+    jobTimer = setInterval(pollJob, 900);
+    pollJob();
+  }
   if (!vs.webPages && !$('sourceMsg').textContent) {
     msg('sourceMsg', '直接 MP4 和 m3u8 已可流式处理；B站、虎牙、斗鱼网页需要安装 yt-dlp。', 'warn');
   }

@@ -29,10 +29,12 @@ import math
 import shutil
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
+from urllib.request import Request, urlopen
 
 
 class VideoError(RuntimeError):
@@ -192,7 +194,7 @@ def _input_options(source: str, headers: dict[str, str] | None = None) -> list[s
     options: list[str] = []
     if _remote(source):
         options += ["-reconnect", "1", "-reconnect_streamed", "1",
-                    "-reconnect_delay_max", "8"]
+                    "-reconnect_delay_max", "8", "-rw_timeout", "30000000"]
     header_text = _header_argument(headers)
     if header_text:
         options += ["-headers", header_text]
@@ -362,6 +364,149 @@ def stream_extract_frames(
     if not records:
         raise VideoError("远程录像没有产生可用画面。")
     return records
+
+
+def sparse_seek_frames(
+    source: str,
+    out_dir: Path,
+    duration_sec: float,
+    every_sec: float = 60.0,
+    width: int = 640,
+    quality: int = 5,
+    headers: dict[str, str] | None = None,
+    on_progress: Any = None,
+    start_sec: float = 0.0,
+    end_sec: float | None = None,
+    mode: str = "fixed",
+    relative_timestamps: bool = False,
+    file_prefix: str = "scout",
+) -> list[dict[str, Any]]:
+    """对超长回放做稀疏随机定位，不顺序下载或解码整段录像。
+
+    侦察阶段只需要判断哪些区间是对局。逐点定位比从头连续解码两三个小时
+    更省网络、磁盘和算力；连续失败三次就回到上层重新解析媒体地址。
+    """
+    exe = ffmpeg_path()
+    if not exe:
+        raise VideoError(INSTALL_HINT)
+    start = max(0.0, float(start_sec))
+    end = min(float(duration_sec), float(end_sec)) if end_sec is not None else float(duration_sec)
+    if end <= start:
+        raise VideoError("分段结束时间必须晚于开始时间。")
+    plan_mode = "smart" if mode == "smart" else "fixed"
+    relative_plan = sampling_plan(end - start, 0, None, plan_mode, every_sec)
+    absolute_times = [round(start + float(at), 3) for at in relative_plan["times"]]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    records: list[dict[str, Any]] = []
+
+    # HLS 的部分平台清单不支持在整条 m3u8 上跨很远 seek。先读文本清单，
+    # 把时间点映射到对应的几秒媒体段；这只下载清单和目标小段，不下载整段回放。
+    targets = [(index, float(at), source, float(at))
+               for index, at in enumerate(absolute_times)]
+    if Path(urlsplit(source).path).suffix.lower() == ".m3u8":
+        try:
+            targets = _hls_scout_targets(source, headers, absolute_times)
+        except VideoError:
+            raise
+        except Exception as err:
+            raise VideoError(f"HLS播放清单无法读取：{err}") from err
+
+    def capture(pair: tuple[int, float, str, float]) -> tuple[int, float, Path, str | None]:
+        index, raw_at, media_source, seek_at = pair
+        at = float(raw_at)
+        record_at = at - start if relative_timestamps else at
+        target = out_dir / f"{file_prefix}_{record_at:010.3f}s.jpg"
+        if not target.is_file():
+            command = [exe, "-nostdin", "-hide_banner", "-loglevel", "error",
+                       "-ss", f"{seek_at:.3f}", *_input_options(media_source, headers),
+                       "-i", media_source, "-frames:v", "1", "-an",
+                       "-vf", f"scale={width}:-2", "-q:v", str(quality),
+                       "-y", str(target)]
+            result = _run(command, timeout=60)
+            if result.returncode != 0 or not target.is_file():
+                return index, record_at, target, result.stderr.strip()[-300:] or "侦察点没有画面"
+        return index, record_at, target, None
+
+    # 三条稀疏读取彼此独立；并发过高反而可能触发视频站限流，因此固定为3。
+    consecutive_failures = 0
+    # 智能时间表可能有两个时间点落在同一个3~5秒媒体段，只保留一次，避免
+    # 保存内容完全相同的重复帧。
+    if Path(urlsplit(source).path).suffix.lower() == ".m3u8":
+        unique: list[tuple[int, float, str, float]] = []
+        seen_media: set[str] = set()
+        for target in targets:
+            if target[2] in seen_media:
+                continue
+            seen_media.add(target[2])
+            unique.append(target)
+        targets = [(new_index, target[1], target[2], target[3])
+                   for new_index, target in enumerate(unique)]
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="vod-scout") as pool:
+        for index, at, target, error in pool.map(capture, targets):
+            if error:
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
+                    raise VideoError(f"远程录像稀疏定位失败：{error}")
+            else:
+                consecutive_failures = 0
+                records.append({"index": len(records), "atSec": at,
+                                "file": target.name, "bytes": target.stat().st_size})
+            if on_progress:
+                on_progress(index + 1, len(targets), at)
+    if not records:
+        raise VideoError("远程录像没有产生可用侦察画面。")
+    return records
+
+
+def _hls_scout_targets(source: str, headers: dict[str, str] | None,
+                       times: list[float]) -> list[tuple[int, float, str, float]]:
+    """将绝对录像时间映射到 HLS 媒体小段及段内时间。"""
+    request_headers = {str(key): str(value) for key, value in (headers or {}).items()
+                      if "\n" not in str(key) and "\r" not in str(key)
+                      and "\n" not in str(value) and "\r" not in str(value)}
+    try:
+        with urlopen(Request(source, headers=request_headers), timeout=30) as response:
+            payload = response.read(16 * 1024 * 1024 + 1)
+    except Exception as err:
+        raise VideoError(f"HLS播放清单读取失败：{err}") from err
+    if len(payload) > 16 * 1024 * 1024:
+        raise VideoError("HLS播放清单超过16 MB，已停止读取。")
+    text = payload.decode("utf-8", errors="replace")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if any(line.startswith("#EXT-X-STREAM-INF") for line in lines):
+        variants = [line for line in lines if not line.startswith("#")]
+        if not variants:
+            raise VideoError("HLS主清单中没有可用媒体线路。")
+        return _hls_scout_targets(urljoin(source, variants[0]), headers, times)
+
+    segments: list[tuple[float, float, str]] = []
+    cursor = 0.0
+    pending_duration: float | None = None
+    for line in lines:
+        if line.startswith("#EXTINF:"):
+            try:
+                pending_duration = float(line.split(":", 1)[1].split(",", 1)[0])
+            except (ValueError, IndexError):
+                pending_duration = None
+        elif not line.startswith("#") and pending_duration is not None:
+            duration = max(0.001, pending_duration)
+            segments.append((cursor, cursor + duration, urljoin(source, line)))
+            cursor += duration
+            pending_duration = None
+    if not segments:
+        raise VideoError("HLS播放清单中没有可定位的媒体小段。")
+
+    output: list[tuple[int, float, str, float]] = []
+    segment_index = 0
+    for index, raw_at in enumerate(times):
+        at = float(raw_at)
+        while segment_index + 1 < len(segments) and at >= segments[segment_index][1]:
+            segment_index += 1
+        start, _end, segment_url = segments[segment_index]
+        # 从媒体小段开头解码最接近的关键帧。若先在只有数秒的 TS 小段内 seek，
+        # 很容易跳过唯一关键帧并得到“Nothing was written”。侦察允许几秒误差。
+        output.append((index, at, segment_url, 0.0))
+    return output
 
 
 def extract_frames(

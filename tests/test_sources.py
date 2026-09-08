@@ -47,11 +47,12 @@ class SourceDetection(unittest.TestCase):
 
 class ResolverBoundaries(unittest.TestCase):
     def test_login_headers_stay_in_memory_for_ffmpeg(self):
-        media_url, headers = sources._media_url({
+        media_url, scout_url, headers = sources._media_url({
             "url": "https://signed.example/video.m3u8?token=secret",
             "http_headers": {"Cookie": "session=secret", "Referer": "https://example.com"},
         })
         self.assertIn("token=secret", media_url)
+        self.assertIsNone(scout_url)
         self.assertEqual(headers["Cookie"], "session=secret")
 
     def test_public_preview_never_contains_media_url_or_headers(self):
@@ -63,6 +64,7 @@ class ResolverBoundaries(unittest.TestCase):
         )
         public = resolved.public()
         self.assertNotIn("sourceUrl", public)
+        self.assertNotIn("scoutSourceUrl", public)
         self.assertNotIn("headers", public)
         self.assertFalse(public["sourceUrlStored"])
         self.assertNotIn("secret", repr(public))
@@ -120,6 +122,22 @@ class SourcePersistence(unittest.TestCase):
             self.assertTrue(current.exists())
             self.assertEqual(report["removedFiles"], 1)
 
+    def test_interrupted_running_job_returns_to_recovery_queue(self):
+        with tempfile.TemporaryDirectory() as raw:
+            data_dir = Path(raw)
+            batch = {"batchId": "SOURCE_INTERRUPTED", "jobs": [
+                {"status": "RUNNING", "stage": "STREAMING"},
+                {"status": "DONE", "stage": "COMPLETE"},
+            ]}
+            sources.save_batch(data_dir, batch)
+            found = sources.interrupted_batches(data_dir)
+            self.assertEqual([item["batchId"] for item in found], ["SOURCE_INTERRUPTED"])
+            self.assertEqual(sources.prepare_interrupted_batch(data_dir, found[0]), 1)
+            saved = sources.load_batch(data_dir, "SOURCE_INTERRUPTED")
+            self.assertEqual(saved["jobs"][0]["status"], "PENDING")
+            self.assertEqual(saved["jobs"][0]["stage"], "RECOVERY_QUEUED")
+            self.assertEqual(saved["jobs"][1]["status"], "DONE")
+
 
 class SourceApi(unittest.TestCase):
     def setUp(self):
@@ -166,12 +184,132 @@ class SourceApi(unittest.TestCase):
         self.assertIsNotNone(batch)
         self.assertIn("originUrl", batch["jobs"][0])
         self.assertNotIn("sourceUrl", batch["jobs"][0])
+        self.assertEqual(batch["processing"]["samplingMode"], "smart")
         meta = store.load_meta(self.data_dir, result["created"][0]["gameId"])
         self.assertFalse(meta["sourceUrlStored"])
         self.assertEqual(meta["videoImportMode"], "remote-stream-no-full-copy")
 
+    def test_existing_interrupted_batch_can_resume_without_resubmitting_url(self):
+        batch = {"batchId": "SOURCE_RESUME", "cookieBrowser": "chrome", "jobs": [{
+            "gameId": "G1", "originUrl": "https://www.huya.com/video/play/1.html",
+            "title": "第一场", "status": "RUNNING", "stage": "RESOLVING",
+        }]}
+        sources.save_batch(self.data_dir, batch)
+        with patch.object(server.CONSOLE, "start_job", return_value={"started": True}):
+            result = server.api_source_resume({"batchId": "SOURCE_RESUME"})
+        self.assertTrue(result["started"])
+        saved = sources.load_batch(self.data_dir, "SOURCE_RESUME")
+        self.assertEqual(saved["jobs"][0]["status"], "PENDING")
+        self.assertTrue(saved["jobs"][0]["recoveredAfterRestart"])
+
+    def test_long_vod_becomes_scout_job_instead_of_failing(self):
+        game_id = "LONG_VOD_001"
+        store.create_game(self.data_dir, game_id, {"title": "长回放"})
+        batch = {
+            "batchId": "SOURCE_LONG", "cookieBrowser": None,
+            "processing": {"samplingMode": "smart", "everySec": 5,
+                           "startSec": 0, "endSec": None},
+            "jobs": [{"gameId": game_id, "originUrl": "https://example.com/long.mp4",
+                      "title": "长回放", "status": "PENDING", "stage": "QUEUED"}],
+        }
+        sources.save_batch(self.data_dir, batch)
+        resolved = sources.ResolvedVideoSource(
+            platform="direct", sourceType="HTTP_VIDEO",
+            originUrl="https://example.com/long.mp4",
+            sourceUrl="https://cdn.example/long.mp4", title="长回放",
+            resolvedAt="2026-09-09T00:00:00+1000",
+        )
+
+        with patch.object(sources, "resolve", return_value=[resolved]), \
+                patch.object(video, "probe_input", return_value=video.VideoInfo(
+                    resolved.sourceUrl, 9393, 1920, 1080, 60)), \
+                patch.object(video, "stream_extract_frames", side_effect=video.VideoError(
+                    "这段录像会超过2000张基础帧，请缩短范围")), \
+                patch.object(video, "sparse_seek_frames", return_value=[
+                    {"index": 0, "atSec": 0.0, "file": "scout_000000.000s.jpg"}]):
+            server._source_batches_work(self.data_dir, [batch])(lambda _message: None)
+        saved = sources.load_batch(self.data_dir, "SOURCE_LONG")
+        self.assertEqual(saved["jobs"][0]["status"], "SCOUT_DONE")
+        meta = store.load_meta(self.data_dir, game_id)
+        self.assertTrue(meta["sourceSegmentationRequired"])
+        self.assertEqual(meta["samplingMode"], "long-source-scout")
+
+    def test_public_page_retry_drops_browser_cookie_after_timeout(self):
+        game_id = "COOKIE_RETRY_001"
+        store.create_game(self.data_dir, game_id, {"title": "公开录像"})
+        batch = {
+            "batchId": "SOURCE_COOKIE", "cookieBrowser": "chrome",
+            "jobs": [{"gameId": game_id, "originUrl": "https://example.com/game.mp4",
+                      "title": "公开录像", "status": "PENDING", "stage": "QUEUED"}],
+        }
+        resolved = sources.ResolvedVideoSource(
+            platform="direct", sourceType="HTTP_VIDEO",
+            originUrl="https://example.com/game.mp4",
+            sourceUrl="https://cdn.example/game.mp4", title="公开录像",
+        )
+        with patch.object(sources, "resolve", side_effect=[
+                sources.SourceError("NETWORK_ERROR"), [resolved]]) as resolver, \
+                patch.object(video, "probe_input", return_value=video.VideoInfo(
+                    resolved.sourceUrl, 10, 1920, 1080, 60)), \
+                patch.object(video, "stream_extract_frames", return_value=[
+                    {"index": 0, "atSec": 0.0, "file": "stream_000000.000s.jpg"}]):
+            server._source_batches_work(self.data_dir, [batch])(lambda _message: None)
+        self.assertEqual(resolver.call_args_list[0].args[1], "chrome")
+        self.assertEqual(resolver.call_args_list[1].args[1], "")
+
+    def test_scout_segments_create_independent_game_records(self):
+        parent_game = "LONG_PARENT_001"
+        store.create_game(self.data_dir, parent_game, {
+            "title": "直播回放", "sampleType": "pro_player_ranked",
+            "sourceSegments": [
+                {"startSec": 180, "endSec": 1080, "status": "READY"},
+                {"startSec": 1260, "endSec": 2220, "status": "READY"},
+            ],
+        })
+        sources.save_batch(self.data_dir, {
+            "batchId": "SOURCE_PARENT", "cookieBrowser": None,
+            "jobs": [{"gameId": parent_game,
+                      "originUrl": "https://www.huya.com/video/play/1.html",
+                      "platform": "huya", "sourceType": "HUYA_PAGE"}],
+        })
+        with patch.object(server.CONSOLE, "start_job", return_value={"started": True}):
+            result = server.api_source_segments_start({
+                "batchId": "SOURCE_PARENT", "parentGameId": parent_game,
+            })
+        self.assertTrue(result["started"])
+        self.assertEqual(result["count"], 2)
+        child = store.load_meta(self.data_dir, result["created"][0]["gameId"])
+        self.assertEqual(child["sourceParentGameId"], parent_game)
+        self.assertEqual(child["segmentDurationSec"], 900)
+        self.assertFalse(child["segmentBoundaryIsTrainingTruth"])
+        parent = store.load_meta(self.data_dir, parent_game)
+        self.assertEqual(parent["analysisStatus"], "SEGMENT_EXTRACTION_RUNNING")
+
 
 class StreamingDecoder(unittest.TestCase):
+    def test_hls_scout_maps_video_time_to_small_media_segments(self):
+        manifest = ("#EXTM3U\n#EXT-X-TARGETDURATION:5\n"
+                    "#EXTINF:5.0,\npart/000.ts?sig=x\n"
+                    "#EXTINF:5.0,\npart/001.ts?sig=x\n"
+                    "#EXTINF:5.0,\npart/002.ts?sig=x\n")
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _maximum):
+                return manifest.encode()
+
+        with patch.object(video, "urlopen", return_value=Response()):
+            targets = video._hls_scout_targets(
+                "https://cdn.example/path/master.m3u8?token=secret", {}, [0, 6, 11]
+            )
+        self.assertEqual([item[3] for item in targets], [0.0, 0.0, 0.0])
+        self.assertIn("part/001.ts", targets[1][2])
+
     def test_dispatcher_gives_each_consumer_its_own_rate(self):
         fast: list[float] = []
         slow: list[float] = []
@@ -221,6 +359,12 @@ class StreamingDecoder(unittest.TestCase):
         )
         self.assertNotIn("topsecret", message)
         self.assertNotIn("abc", message)
+
+    def test_long_source_limit_is_not_reported_as_network_failure(self):
+        self.assertEqual(
+            sources.classify_media_error("这段录像会超过2000张基础帧，请缩短范围"),
+            "SOURCE_TOO_LONG",
+        )
 
 
 if __name__ == "__main__":

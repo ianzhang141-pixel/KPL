@@ -41,6 +41,7 @@ ERROR_MESSAGES = {
     "RESOLVER_MISSING": "网页解析工具 yt-dlp 尚未安装。",
     "RESOLVER_ERROR": "网页中没有解析出可读取的录像。",
     "NO_VIDEO_STREAM": "页面中没有可用的视频流。",
+    "SOURCE_TOO_LONG": "录像时长超过单场比赛范围，需要先进行分段侦察。",
     "DRM_PROTECTED": "该录像受 DRM 保护，系统不会尝试绕过。",
     "INVALID_SOURCE": "录像地址不合法。",
 }
@@ -63,6 +64,7 @@ class ResolvedVideoSource:
     originUrl: str
     sourceUrl: str | None
     title: str
+    scoutSourceUrl: str | None = field(default=None, repr=False)
     durationSec: float | None = None
     width: int | None = None
     height: int | None = None
@@ -82,6 +84,7 @@ class ResolvedVideoSource:
         """给前端的安全副本：不暴露媒体签名地址、Cookie 或请求头。"""
         result = asdict(self)
         result.pop("sourceUrl", None)
+        result.pop("scoutSourceUrl", None)
         result.pop("headers", None)
         result["sourceUrlStored"] = False
         return result
@@ -241,6 +244,8 @@ def _classify_ytdlp_error(stderr: str) -> str:
 
 def classify_media_error(detail: Any) -> str:
     lower = str(detail or "").lower()
+    if "超过2000张基础帧" in lower:
+        return "SOURCE_TOO_LONG"
     if "drm" in lower:
         return "DRM_PROTECTED"
     if "401" in lower or "login" in lower or "sign in" in lower:
@@ -286,7 +291,7 @@ def _run_ytdlp(origin: str, cookie_browser: str = "") -> dict[str, Any]:
     return payload
 
 
-def _media_url(payload: dict[str, Any]) -> tuple[str | None, dict[str, str]]:
+def _media_url(payload: dict[str, Any]) -> tuple[str | None, str | None, dict[str, str]]:
     url = payload.get("url")
     candidates = payload.get("requested_formats") or []
     if not url and isinstance(candidates, list):
@@ -296,19 +301,28 @@ def _media_url(payload: dict[str, Any]) -> tuple[str | None, dict[str, str]]:
             videos.sort(key=lambda item: (_number(item.get("height")) or 0,
                                           _number(item.get("tbr")) or 0), reverse=True)
             url = videos[0].get("url")
+    scout_url = None
+    formats = payload.get("formats") or []
+    if isinstance(formats, list):
+        scout_formats = [item for item in formats if isinstance(item, dict)
+                         and item.get("url") and item.get("vcodec") != "none"]
+        scout_formats.sort(key=lambda item: (_number(item.get("height")) or 100000,
+                                             _number(item.get("tbr")) or 100000))
+        if scout_formats:
+            scout_url = str(scout_formats[0]["url"])
     headers = payload.get("http_headers") if isinstance(payload.get("http_headers"), dict) else {}
     # 登录态请求头可以在解析任务的内存中交给 ffmpeg，但 public()、任务文件和
     # 日志都必须剔除它们。否则“用浏览器登录状态解析”会在取到媒体地址后又因
     # 缺少 Cookie 而播放失败。
     transient_headers = {str(key): str(value) for key, value in headers.items()}
-    return str(url) if url else None, transient_headers
+    return str(url) if url else None, scout_url, transient_headers
 
 
 def _from_ytdlp(payload: dict[str, Any], origin: str, platform: str,
                 source_type: str, resolver_name: str,
                 playlist_index: int | None = None, playlist_count: int = 1,
                 metadata: dict[str, Any] | None = None) -> ResolvedVideoSource:
-    source_url, headers = _media_url(payload)
+    source_url, scout_source_url, headers = _media_url(payload)
     webpage = str(payload.get("webpage_url") or origin)
     title = str(payload.get("title") or payload.get("fulltitle") or "未命名录像")[:300]
     video_id = payload.get("id")
@@ -318,6 +332,7 @@ def _from_ytdlp(payload: dict[str, Any], origin: str, platform: str,
         originUrl=webpage,
         sourceUrl=source_url,
         title=title,
+        scoutSourceUrl=scout_source_url,
         durationSec=_number(payload.get("duration")),
         width=_number(payload.get("width"), integer=True),
         height=_number(payload.get("height"), integer=True),
@@ -476,11 +491,50 @@ def list_batches(data_dir: Path, limit: int = 10) -> list[dict[str, Any]]:
             "pending": sum(1 for job in jobs if job.get("status") == "PENDING"),
             "running": sum(1 for job in jobs if job.get("status") == "RUNNING"),
             "done": sum(1 for job in jobs if job.get("status") == "DONE"),
+            "scoutDone": sum(1 for job in jobs if job.get("status") == "SCOUT_DONE"),
             "failed": sum(1 for job in jobs if job.get("status") == "FAILED"),
         })
         if len(summaries) >= limit:
             break
     return summaries
+
+
+def interrupted_batches(data_dir: Path) -> list[dict[str, Any]]:
+    """读取因服务退出而遗留的待处理/运行中批次，按创建时间从旧到新返回。"""
+    root = data_dir / "kpl" / "source_batches"
+    if not root.is_dir():
+        return []
+    result: list[dict[str, Any]] = []
+    for path in sorted(root.glob("*.json"), key=lambda item: item.stat().st_mtime):
+        try:
+            batch = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError):
+            continue
+        if not isinstance(batch, dict):
+            continue
+        jobs = batch.get("jobs") if isinstance(batch.get("jobs"), list) else []
+        if any(job.get("status") in {"PENDING", "RUNNING"}
+               for job in jobs if isinstance(job, dict)):
+            result.append(batch)
+    return result
+
+
+def prepare_interrupted_batch(data_dir: Path, batch: dict[str, Any]) -> int:
+    """把上次进程里的 RUNNING 安全退回队列；已完成和已失败任务保持不动。"""
+    recovered = 0
+    now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    jobs = batch.get("jobs") if isinstance(batch.get("jobs"), list) else []
+    for job in jobs:
+        if not isinstance(job, dict) or job.get("status") != "RUNNING":
+            continue
+        job.update({"status": "PENDING", "stage": "RECOVERY_QUEUED",
+                    "recoveredAfterRestart": True, "recoveredAt": now,
+                    "updatedAt": now})
+        recovered += 1
+    if recovered:
+        batch["recoveryCount"] = int(batch.get("recoveryCount") or 0) + 1
+        save_batch(data_dir, batch)
+    return recovered
 
 
 def find_duplicate(data_dir: Path, fingerprint: str) -> str | None:
