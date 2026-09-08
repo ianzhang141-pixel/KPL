@@ -20,7 +20,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (__version__, annotate, check, economy_s44, evaluate, hud, knowledge_s44,
-               minimap, ocr, paths, rules, samples, schema, season_s44, sources,
+               minimap, model, ocr, paths, rules, samples, schema, season_s44, sources,
                state as state_mod, store, video)
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -843,6 +843,92 @@ def api_minimap_save(body: dict[str, Any]) -> dict[str, Any]:
             "thresholds": minimap.load_thresholds(data_dir)}
 
 
+def api_analysis(game_id: str) -> dict[str, Any]:
+    """一场比赛的完整分析：胜率曲线 + 拐点 + 每个拐点发生了什么。
+
+    没有训练好的模型时返回基线曲线，并把 `kind` 标成 `"baseline"`。
+    **前端必须据此显示警告并把线画成虚线** —— 这条曲线是假设出来的。
+    """
+    data_dir = _console().data_dir
+    if not store.valid_game_id(game_id):
+        return {"ok": False, "error": "比赛编号不合法。"}
+    meta = store.load_meta(data_dir, game_id)
+    if not meta:
+        return {"ok": False, "error": f"没有这场比赛：{game_id}"}
+
+    observations = list(store.read_jsonl_gz(store.observations_path(data_dir, game_id)))
+    if not observations:
+        return {
+            "ok": False,
+            "stage": "no_observations",
+            "error": "这场还没有任何观测数据，算不出曲线。",
+            "next": "先去标注页逐帧填数，或者标定 HUD 之后跑识别。",
+        }
+
+    built = state_mod.build(meta, observations, rules.load(data_dir))
+
+    # 目前没有任何训练好的模型 —— 这是事实，不是占位。
+    # 等真的训出来了，这里从磁盘读模型，kind 会变成 "trained"。
+    trained = _load_model(data_dir)
+
+    curve = model.win_curve(built, trained)
+    inflections = model.find_inflections(curve)
+    return {
+        "ok": True,
+        "meta": built["meta"],
+        "coverage": built["coverage"],
+        "curve": curve,
+        "inflections": [
+            {**inf, "explain": model.explain_inflection(inf)} for inf in inflections
+        ],
+        "branchStatus": model.branch_analysis_status(),
+        "baselinePriors": model.BASELINE_PRIORS if curve["kind"] == "baseline" else None,
+    }
+
+
+def _load_model(data_dir: Path) -> dict[str, Any] | None:
+    """读取训练好的模型。现在永远返回 None —— 因为一个都还没训出来。
+
+    **不要在这里塞一个假模型让页面好看。** 页面显示基线曲线并挂着警告，
+    比显示一条假装是模型输出的曲线诚实得多。
+    """
+    path = data_dir / "kpl" / "model.json"
+    if not path.is_file():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    return loaded if isinstance(loaded, dict) and loaded.get("kind") == "trained" else None
+
+
+def api_train(body: dict[str, Any]) -> dict[str, Any]:
+    """在本机所有比赛上训练一版 V(s)。数据不够会拒绝 —— 那是设计。"""
+    data_dir = _console().data_dir
+    games = []
+    for game_id in store.list_games(data_dir):
+        meta = store.load_meta(data_dir, game_id)
+        if not meta or meta.get("blueWin") is None:
+            continue
+        observations = list(store.read_jsonl_gz(store.observations_path(data_dir, game_id)))
+        if observations:
+            games.append(state_mod.build(meta, observations, rules.load(data_dir)))
+
+    try:
+        trained = model.train(games)
+    except model.TrainingRefused as err:
+        return {"ok": False, "refused": True, "error": str(err),
+                "gamesConsidered": len(games)}
+
+    path = data_dir / "kpl" / "model.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(trained, handle, ensure_ascii=False, indent=2)
+    return {"ok": True, "model": {k: v for k, v in trained.items()
+                                  if k not in ("means", "stds")}}
+
+
 def api_build_state(body: dict[str, Any]) -> dict[str, Any]:
     data_dir = _console().data_dir
     game_id = str(body.get("gameId") or "")
@@ -1038,6 +1124,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_file(WEB_DIR / "annotate.html")
             elif path == "/calibrate":
                 self._send_file(WEB_DIR / "calibrate.html")
+            elif path == "/analysis":
+                self._send_file(WEB_DIR / "analysis.html")
             elif path == "/debug":
                 self._send_file(WEB_DIR / "debug.html")
             elif path == "/api/status":
@@ -1052,6 +1140,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(api_frames(_tail(path)))
             elif path.startswith("/api/state/"):
                 self._send_json(api_state(_tail(path)))
+            elif path.startswith("/api/analysis/"):
+                self._send_json(api_analysis(_tail(path)))
             elif path.startswith("/api/check/"):
                 self._send_json(check.run(_console().data_dir, _tail(path)))
             elif path.startswith("/api/evaluate/"):
@@ -1081,6 +1171,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/profile": api_save_profile,
             "/api/state/build": api_build_state,
             "/api/extract": api_extract,
+            "/api/train": api_train,
             "/api/minimap/detect": api_minimap_detect,
             "/api/minimap/save": api_minimap_save,
             "/api/video/register": api_register_browser_video,

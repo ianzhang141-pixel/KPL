@@ -1,0 +1,382 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>王者荣耀决策实验室 · 比赛分析</title>
+<style>
+  :root { color-scheme: dark;
+    --surface-0:#0f1216; --surface-1:#171b22; --surface-2:#1c212a;
+    --line:#232935; --text-1:#e6e9ef; --text-2:#8b93a1; --text-3:#5b6373;
+    --blue:#3b82f6; --red:#ef4444; --amber:#f59e0b; --green:#4ade80;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:20px 24px 90px; background:var(--surface-0); color:var(--text-1);
+         font:14px/1.55 -apple-system,"PingFang SC",system-ui,sans-serif;
+         font-variant-numeric: tabular-nums; max-width:1180px; }
+  a { color:#7aa7ff; }
+  h1 { font-size:20px; margin:0 0 3px; }
+  .sub { color:var(--text-2); margin:0 0 16px; font-size:13px; }
+  .card { background:var(--surface-1); border:1px solid var(--line); border-radius:10px;
+          padding:18px 20px; margin-bottom:14px; }
+  .card h2 { font-size:15px; margin:0 0 4px; }
+  .card .hint { color:var(--text-2); font-size:13px; margin:0 0 14px; }
+  select, button { font:inherit; }
+  select { background:var(--surface-0); border:1px solid #2f3644; color:var(--text-1);
+           border-radius:6px; padding:7px 10px; font-size:13px; }
+  button { background:#3b82f6; border:1px solid #3b82f6; color:#fff; border-radius:6px;
+           padding:8px 14px; font-size:13px; cursor:pointer; }
+  button.ghost { background:#232935; border-color:#2f3644; color:var(--text-1); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+
+  /* 警告横幅：基线曲线绝不能被当成模型输出 */
+  .warnbar { background:#2a2211; border:1px solid #7a5f2a; border-left:4px solid var(--amber);
+             color:#fcd34d; border-radius:8px; padding:13px 16px; margin-bottom:14px;
+             font-size:13px; white-space:pre-wrap; line-height:1.6; }
+  .warnbar b { color:#fde68a; }
+  .errbar { background:#2a1113; border:1px solid #7a2a2f; border-left:4px solid var(--red);
+            color:#fca5a5; border-radius:8px; padding:13px 16px; font-size:13px;
+            white-space:pre-wrap; }
+
+  .stat { display:flex; gap:26px; flex-wrap:wrap; margin-bottom:4px; }
+  .stat > div { min-width:96px; }
+  .stat b { display:block; font-size:20px; font-weight:600; }
+  .stat span { color:var(--text-2); font-size:12px; }
+
+  figure { margin:0; }
+  figcaption { color:var(--text-2); font-size:12px; margin:0 0 10px; }
+  .chart { position:relative; width:100%; }
+  svg { display:block; width:100%; height:auto; }
+  .tip { position:absolute; pointer-events:none; background:#0b0e12; border:1px solid #2f3644;
+         border-radius:7px; padding:8px 10px; font-size:12px; opacity:0;
+         transition:opacity .1s; min-width:130px; z-index:5; }
+  .tip b { font-size:13px; }
+  .tip .ev { color:var(--text-2); margin-top:3px; }
+
+  .legend { display:flex; gap:18px; font-size:12px; color:var(--text-2);
+            margin-top:4px; flex-wrap:wrap; align-items:center; }
+  .swatch { display:inline-block; width:11px; height:11px; border-radius:3px;
+            vertical-align:-1px; margin-right:5px; }
+  /* 图例里的「拐点」示意。用 CSS 画而不是内联 <svg> ——
+     内联 svg 在 flex 图例里会自成一行，把图例撑散（截图上能看到那个孤零零的圆圈）。*/
+  .ring { display:inline-block; width:10px; height:10px; border-radius:50%;
+          border:2.5px solid var(--text-1); vertical-align:-1px; margin-right:5px; }
+
+  .infl { border-left:3px solid var(--line); padding:9px 12px; margin-bottom:7px;
+          background:var(--surface-2); border-radius:0 7px 7px 0; cursor:pointer; }
+  .infl:hover { border-left-color:#7aa7ff; }
+  .infl.on { border-left-color:var(--blue); background:#1e2a3d; }
+  .infl .hd { display:flex; justify-content:space-between; gap:10px; font-size:13px; }
+  .infl .dl { font-weight:600; }
+  .up { color:#7aa7ff; } .down { color:#fca5a5; }
+
+  .panel { border-top:1px solid var(--line); margin-top:14px; padding-top:14px; }
+  .kv { display:grid; grid-template-columns:auto 1fr; gap:5px 14px; font-size:13px; }
+  .kv dt { color:var(--text-2); } .kv dd { margin:0; }
+  ul.what { margin:6px 0 0; padding-left:18px; font-size:13px; }
+  ul.what li { margin-bottom:3px; }
+
+  .blocked { background:var(--surface-2); border:1px dashed #3a4150; border-radius:8px;
+             padding:14px 16px; margin-top:12px; }
+  .blocked h3 { margin:0 0 6px; font-size:13px; color:var(--amber); }
+  .blocked p { margin:0; color:var(--text-2); font-size:12.5px; white-space:pre-wrap; line-height:1.65; }
+
+  table { width:100%; border-collapse:collapse; font-size:12.5px; margin-top:8px; }
+  th { text-align:left; color:var(--text-2); font-weight:500; font-size:11.5px;
+       border-bottom:1px solid var(--line); padding:6px 7px; }
+  td { padding:5px 7px; border-bottom:1px solid var(--surface-2); }
+  details summary { cursor:pointer; color:var(--text-2); font-size:12.5px; }
+  .pipe { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
+  .pipe span { font-size:11.5px; padding:3px 9px; border-radius:99px;
+               border:1px solid #2f3644; color:var(--text-3); }
+  .pipe span.done { border-color:#16663a; color:var(--green); background:#0d2a17; }
+  .pipe span.now { border-color:var(--amber); color:#fcd34d; background:#2a2211; }
+</style>
+
+<h1>比赛分析</h1>
+<p class="sub">
+  <a href="/">← 控制台</a> · <a href="/annotate">标注页</a> ·
+  <a href="/calibrate">标定页</a> · <a href="/debug">逐帧核对</a>
+</p>
+
+<div class="card">
+  <div class="row">
+    <select id="gameSel"></select>
+    <button class="ghost" onclick="load()">刷新</button>
+    <span id="metaText" style="color:var(--text-2);font-size:13px"></span>
+  </div>
+  <div class="pipe" id="pipe"></div>
+</div>
+
+<div id="warn"></div>
+<div id="body" style="display:none">
+
+  <div class="card">
+    <div class="stat">
+      <div><b id="sFrames">—</b><span>可用帧</span></div>
+      <div><b id="sCov">—</b><span>可信字段占比</span></div>
+      <div><b id="sInfl">—</b><span>拐点</span></div>
+      <div><b id="sBiggest">—</b><span>最大单次波动</span></div>
+      <div><b id="sResult">—</b><span>实际结果</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <figure>
+      <h2 id="chartTitle">蓝方胜率曲线</h2>
+      <figcaption id="chartCap"></figcaption>
+      <div class="chart" id="chartWrap">
+        <svg id="svg" viewBox="0 0 900 340" role="img" aria-labelledby="chartTitle"></svg>
+        <div class="tip" id="tip"></div>
+      </div>
+      <div class="legend">
+        <span><i class="swatch" style="background:var(--blue)"></i>蓝方占优（&gt;50%）</span>
+        <span><i class="swatch" style="background:var(--red)"></i>红方占优（&lt;50%）</span>
+        <span><i class="ring"></i>加粗圆点 = 胜率拐点，可点击</span>
+      </div>
+    </figure>
+    <details style="margin-top:14px">
+      <summary>用表格看这条曲线（每一帧的数值）</summary>
+      <table id="dataTable"></table>
+    </details>
+  </div>
+
+  <div class="card">
+    <h2>拐点清单</h2>
+    <p class="hint">
+      按波动大小排序。<b>这里回答的是「哪里出事了」，不是「谁做错了」</b> ——
+      胜率掉 6 个点是事实，但原因可能是你被抓、也可能是队友送头、
+      还可能是对面一个越塔操作。曲线本身分不清这三种。
+    </p>
+    <div id="inflList"></div>
+    <div class="panel" id="detail" style="display:none"></div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let DATA = null, SEL = -1;
+const W = 900, H = 340, PAD = {t:18, r:20, b:34, l:46};
+
+function qs(k){ return new URLSearchParams(location.search).get(k)||''; }
+async function api(p,b){ const o=b?{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify(b)}:{}; return (await fetch(p,o)).json(); }
+const esc = t => String(t==null?'':t).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function boot(){
+  const inv = await api('/api/games');
+  const want = qs('game') || (inv.games[0]||{}).gameId || '';
+  $('gameSel').innerHTML = inv.games.map(g=>
+    `<option value="${esc(g.gameId)}" ${g.gameId===want?'selected':''}>${esc(g.gameId)}</option>`).join('')
+    || '<option value="">还没有比赛</option>';
+  if ($('gameSel').value) load();
+  else $('warn').innerHTML = '<div class="errbar">还没有任何比赛。先去控制台建立一场，再标注几帧。</div>';
+}
+$('gameSel').addEventListener('change', load);
+
+function pipeline(stage){
+  const steps = [['建立比赛','done'],['抽帧',stage.frames?'done':''],
+    ['标注/识别',stage.obs?'done':'now'],['State',stage.obs?'done':''],
+    ['胜率曲线',stage.curve?(stage.trained?'done':'now'):''],
+    ['分支胜率（Q）','']];
+  $('pipe').innerHTML = steps.map(([t,c])=>`<span class="${c}">${t}</span>`).join('');
+}
+
+async function load(){
+  const game = $('gameSel').value;
+  if(!game) return;
+  $('body').style.display='none';
+  const res = await api('/api/analysis/'+encodeURIComponent(game));
+  if(!res.ok){
+    pipeline({});
+    $('warn').innerHTML = `<div class="errbar">${esc(res.error)}${
+      res.next?'\n\n下一步：'+esc(res.next):''}</div>`;
+    return;
+  }
+  DATA = res; SEL = -1;
+  const m = res.meta;
+  $('metaText').textContent =
+    `${m.blueTeam||'?'}（蓝） vs ${m.redTeam||'?'}（红）` + (m.tournament?`　${m.tournament}`:'');
+  pipeline({frames:true, obs:true, curve:true, trained:res.curve.trained});
+
+  // 基线曲线的警告必须是页面上最显眼的东西之一
+  $('warn').innerHTML = res.curve.trained ? '' : `<div class="warnbar">
+<b>⚠️ 这条曲线是「假设」出来的，不是模型算出来的。</b>
+
+本项目<b>还没有任何在真实王者荣耀数据上训练过的胜率模型</b>，一个都没有。
+下面这条线用的是一组写死的系数（经济差、推塔、中立资源各占多少权重），
+系数和依据都列在页面底部，是凭对游戏的理解定的，<b>没有经过任何数据验证</b>。
+
+它能用来看产品长什么样、看链路通不通；
+<b>不能用来判断任何一场比赛谁优谁劣，更不能拿去跟战队汇报。</b>
+
+要变成真的：需要至少 30 场带胜负标签的比赛（现在的门槛），才允许训练。</div>`;
+
+  $('sFrames').textContent = res.curve.points.length;
+  $('sCov').textContent = Math.round((res.coverage.trustedRatio||0)*100)+'%';
+  $('sInfl').textContent = res.inflections.length;
+  const big = res.inflections[0];
+  $('sBiggest').innerHTML = big
+    ? `<span class="${big.deltaPP>0?'up':'down'}">${big.deltaPP>0?'+':''}${big.deltaPP}pp</span>`
+    : '—';
+  $('sResult').textContent = m.blueWin===true?'蓝方胜':m.blueWin===false?'红方胜':'未记录';
+  $('chartCap').textContent = res.curve.trained
+    ? `模型曲线（训练集准确率 ${res.curve.accuracy}，注意这不是真实准确率）`
+    : '假设基线 · 虚线表示这不是模型输出';
+
+  draw(); renderList(); renderTable();
+  $('body').style.display='block';
+}
+
+function draw(){
+  const pts = DATA.curve.points;
+  if(!pts.length){ $('svg').innerHTML=''; return; }
+  const iw = W-PAD.l-PAD.r, ih = H-PAD.t-PAD.b;
+  const maxT = Math.max(...pts.map(p=>p.atSec)) || 1;
+  const X = s => PAD.l + (s/maxT)*iw;
+  const Y = p => PAD.t + (1-p)*ih;
+  const inflIdx = new Map(DATA.inflections.map((f,i)=>[f.index,i]));
+  const dashed = !DATA.curve.trained;
+
+  let g = '';
+  // 网格与坐标轴：recessive
+  for(let v=0; v<=1.0001; v+=0.25){
+    const y = Y(v);
+    g += `<line x1="${PAD.l}" y1="${y}" x2="${W-PAD.r}" y2="${y}"
+      stroke="${v===0.5?'#3a4150':'#232935'}" stroke-width="1"
+      ${v===0.5?'stroke-dasharray="4 4"':''}/>
+      <text x="${PAD.l-8}" y="${y+4}" text-anchor="end" fill="#5b6373" font-size="11">${v*100}%</text>`;
+  }
+  for(let mnt=0; mnt*60<=maxT; mnt+=Math.max(1,Math.ceil(maxT/60/8))){
+    const x = X(mnt*60);
+    g += `<text x="${x}" y="${H-PAD.b+18}" text-anchor="middle" fill="#5b6373" font-size="11">${mnt}′</text>`;
+  }
+  g += `<text x="${PAD.l-8}" y="${PAD.t-6}" text-anchor="end" fill="#5b6373" font-size="10">蓝方胜率</text>`;
+
+  // 50% 以上填蓝、以下填红：这条线的含义本身就是发散的
+  const area = (above) => {
+    let d = `M ${X(pts[0].atSec)} ${Y(0.5)}`;
+    pts.forEach(p=>{ const v = above ? Math.max(0.5,p.blueWinProbability)
+                                     : Math.min(0.5,p.blueWinProbability);
+                     d += ` L ${X(p.atSec)} ${Y(v)}`; });
+    d += ` L ${X(pts[pts.length-1].atSec)} ${Y(0.5)} Z`;
+    return d;
+  };
+  g += `<path d="${area(true)}"  fill="var(--blue)" opacity=".16"/>`;
+  g += `<path d="${area(false)}" fill="var(--red)"  opacity=".16"/>`;
+
+  const line = pts.map((p,i)=>`${i?'L':'M'} ${X(p.atSec)} ${Y(p.blueWinProbability)}`).join(' ');
+  g += `<path d="${line}" fill="none" stroke="#c6ccd8" stroke-width="2"
+        stroke-linejoin="round" stroke-linecap="round"
+        ${dashed?'stroke-dasharray="7 5"':''}/>`;
+
+  // 两趟画：先铺全部命中圈，再把可见圆点画在最上面。
+  // 一趟画会让后一个点的透明命中圈盖住前一个点的可见圆点 ——
+  // 用户看得见圆点却点不动，Playwright 里表现为 "intercepts pointer events"。
+  let hits = '', dots = '';
+  pts.forEach((p,i)=>{
+    const k = inflIdx.get(i);
+    const x = X(p.atSec), y = Y(p.blueWinProbability);
+    hits += `<circle cx="${x}" cy="${y}" r="11" fill="transparent" class="hit" data-i="${i}"
+             ${k!==undefined?`data-k="${k}"`:''} style="cursor:${k!==undefined?'pointer':'default'}"/>`;
+    if(k!==undefined){
+      const up = DATA.inflections[k].deltaPP > 0;
+      dots += `<circle cx="${x}" cy="${y}" r="7" fill="${up?'var(--blue)':'var(--red)'}"
+               stroke="var(--surface-1)" stroke-width="2.5" class="dot" data-k="${k}" data-i="${i}"
+               style="cursor:pointer"><title>${esc(p.clock)} 胜率拐点</title></circle>`;
+    }
+  });
+  g += hits + dots;
+  // pointer-events:none 是必须的：十字线画在最上层且跟着光标走，
+  // 不关掉指针事件它会挡住下面的圆点 —— 视觉上完全看不出来，
+  // 但用户点拐点会点不动（Playwright 报 "intercepts pointer events"）。
+  g += `<line id="cross" x1="0" y1="${PAD.t}" x2="0" y2="${H-PAD.b}"
+        stroke="#3a4150" stroke-width="1" opacity="0" pointer-events="none"/>`;
+  $('svg').innerHTML = g;
+
+  const wrap = $('chartWrap'), tip = $('tip');
+
+  // 悬停逻辑只写一份，命中圈和可见圆点共用。
+  // 拐点上的可见圆点盖在命中圈之上，如果只给命中圈绑 tooltip，
+  // 恰恰是最值得看的那几个点没有 tooltip —— 这是 Playwright 测出来的。
+  function showTip(el){
+    const p = pts[+el.dataset.i];
+    if(!p) return;
+    const r = wrap.getBoundingClientRect();
+    const cx = +el.getAttribute('cx'), cy = +el.getAttribute('cy');
+    const cross = $('svg').querySelector('#cross');
+    cross.setAttribute('x1', cx); cross.setAttribute('x2', cx);
+    cross.setAttribute('opacity','1');
+    const k = el.dataset.k;
+    tip.innerHTML = `<b>${esc(p.clock)}　${(p.blueWinProbability*100).toFixed(1)}%</b>
+      <div class="ev">经济差 ${p.features.goldDiffK>0?'+':''}${p.features.goldDiffK}k　
+      击杀差 ${p.features.killDiff>0?'+':''}${p.features.killDiff}</div>
+      ${p.events.length?`<div class="ev">${p.events.length} 个事件</div>`:''}
+      ${k!==undefined?'<div class="ev" style="color:#7aa7ff">拐点 · 点击看详情</div>':''}`;
+    tip.style.opacity = 1;
+    tip.style.left = Math.min(r.width-160, cx*(r.width/W) + 12) + 'px';
+    tip.style.top = (cy*(r.height/H) - 10) + 'px';
+  }
+  function hideTip(){
+    tip.style.opacity = 0;
+    $('svg').querySelector('#cross').setAttribute('opacity','0');
+  }
+
+  $('svg').querySelectorAll('.hit, .dot').forEach(el=>{
+    el.addEventListener('mouseenter', ()=> showTip(el));
+    el.addEventListener('mouseleave', hideTip);
+    if(el.dataset.k !== undefined)
+      el.addEventListener('click', ()=> pick(+el.dataset.k));
+  });
+}
+
+function renderList(){
+  $('inflList').innerHTML = DATA.inflections.length ? DATA.inflections.map((f,i)=>`
+    <div class="infl ${i===SEL?'on':''}" onclick="pick(${i})">
+      <div class="hd">
+        <span><b>${esc(f.clock)}</b>　${(f.fromProbability*100).toFixed(0)}% →
+          ${(f.toProbability*100).toFixed(0)}%</span>
+        <span class="dl ${f.deltaPP>0?'up':'down'}">${f.deltaPP>0?'+':''}${f.deltaPP}pp
+          　利好${esc(f.direction)}</span>
+      </div>
+    </div>`).join('')
+    : '<p style="color:var(--text-2);font-size:13px">没有超过阈值的拐点。可能是这场很平稳，也可能是可用帧太少。</p>';
+}
+
+function pick(i){
+  SEL = i; renderList();
+  const f = DATA.inflections[i], ex = f.explain, b = DATA.branchStatus;
+  $('detail').style.display='block';
+  $('detail').innerHTML = `
+    <h2 style="font-size:15px;margin:0 0 10px">${esc(f.clock)}　
+      <span class="${f.deltaPP>0?'up':'down'}">${f.deltaPP>0?'+':''}${f.deltaPP}pp</span>
+      <span style="color:var(--text-2);font-weight:400;font-size:13px">　利好${esc(f.direction)}</span></h2>
+    <dl class="kv">
+      <dt>这一段发生了什么</dt><dd><ul class="what">${
+        ex.whatHappened.map(w=>`<li>${esc(w)}</li>`).join('')}</ul></dd>
+    </dl>
+    <div class="blocked">
+      <h3>${esc(b.title)}　—　未实现</h3>
+      <p>${esc(b.why)}
+<b>卡在：</b>${esc(b.blockedBy)}</p>
+    </div>
+    <p style="color:var(--text-3);font-size:12px;margin:10px 0 0">
+      上面「发生了什么」是从数据里如实读出来的事实。
+      <b>它不代表因果</b> —— 同一时刻场上有十个人在做十件事，
+      曲线只知道局面变了，不知道是谁让它变的。</p>`;
+  $('detail').scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+function renderTable(){
+  const pts = DATA.curve.points;
+  $('dataTable').innerHTML =
+    `<thead><tr><th>时间</th><th>蓝方胜率</th><th>经济差</th><th>击杀差</th>
+      <th>推塔差</th><th>可信度</th></tr></thead><tbody>` +
+    pts.map(p=>`<tr><td>${esc(p.clock)}</td>
+      <td>${(p.blueWinProbability*100).toFixed(1)}%</td>
+      <td>${p.features.goldDiffK>0?'+':''}${p.features.goldDiffK}k</td>
+      <td>${p.features.killDiff>0?'+':''}${p.features.killDiff}</td>
+      <td>${p.features.towerDiff>0?'+':''}${p.features.towerDiff}</td>
+      <td>${Math.round((p.coverage||0)*100)}%</td></tr>`).join('') + '</tbody>';
+}
+
+boot();
+</script>

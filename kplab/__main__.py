@@ -13,6 +13,8 @@
     python3 -m kplab evaluate <比赛编号>         人工标注 vs 机器识别，看识别准不准
     python3 -m kplab rules                      查看 / 核对游戏常量
     python3 -m kplab minimap <帧图>              小地图找人（认位置，不认英雄）
+    python3 -m kplab curve  <比赛编号>           胜率曲线与拐点（目前是假设基线）
+    python3 -m kplab train                      训练 V(s)（数据不够会拒绝，那是设计）
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ import sys
 from pathlib import Path
 
 from . import (__version__, annotate, check, economy_s44, evaluate, hud, knowledge_s44,
-               minimap, ocr, paths, rules, schema, sources, state as state_mod, store,
+               minimap, model, ocr, paths, rules, schema, sources, state as state_mod, store,
                video)
 
 
@@ -353,6 +355,91 @@ def cmd_minimap(args: argparse.Namespace) -> int:
     return 0 if result["quality"]["usable"] else 1
 
 
+def cmd_curve(args: argparse.Namespace) -> int:
+    data_dir = paths.find_data_dir(args.data)
+    meta = store.load_meta(data_dir, args.game_id)
+    if not meta:
+        print(f"❌ 没有这场比赛：{args.game_id}")
+        return 2
+    observations = list(store.read_jsonl_gz(store.observations_path(data_dir, args.game_id)))
+    if not observations:
+        print("❌ 这场还没有任何观测。先去标注：python3 -m kplab serve")
+        return 2
+
+    built = state_mod.build(meta, observations, rules.load(data_dir))
+    model_path = data_dir / "kpl" / "model.json"
+    trained = None
+    if model_path.is_file():
+        try:
+            with model_path.open("r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            trained = loaded if loaded.get("kind") == "trained" else None
+        except (OSError, ValueError):
+            trained = None
+
+    curve = model.win_curve(built, trained)
+    if not curve["trained"]:
+        print("=" * 74)
+        print("⚠️  下面这条曲线是**假设**出来的，不是模型算出来的。")
+        for line in model.BASELINE_NOTE.splitlines():
+            print(f"    {line}")
+        print("=" * 74)
+    print()
+
+    for point in curve["points"]:
+        probability = point["blueWinProbability"]
+        bar = "█" * int(probability * 40)
+        print(f"  {point['clock']}  {probability * 100:5.1f}%  {bar}")
+
+    inflections = model.find_inflections(curve)
+    print()
+    print(f"── 拐点（{len(inflections)} 个，按波动排序）──")
+    print("  这里回答的是「哪里出事了」，不是「谁做错了」。")
+    for inflection in inflections[:args.top]:
+        explained = model.explain_inflection(inflection)
+        print()
+        print(f"  {inflection['clock']}  {inflection['deltaPP']:+.1f}pp  "
+              f"利好{inflection['direction']}")
+        for line in explained["whatHappened"][:5]:
+            print(f"      · {line}")
+    status = model.branch_analysis_status()
+    print()
+    print(f"── {status['title']}：未实现 ──")
+    for line in status["why"].splitlines():
+        print(f"  {line}")
+    print(f"  卡在：{status['blockedBy']}")
+    return 0
+
+
+def cmd_train(args: argparse.Namespace) -> int:
+    data_dir = paths.find_data_dir(args.data)
+    games = []
+    for game_id in store.list_games(data_dir):
+        meta = store.load_meta(data_dir, game_id)
+        if not meta or meta.get("blueWin") is None:
+            continue
+        observations = list(store.read_jsonl_gz(store.observations_path(data_dir, game_id)))
+        if observations:
+            games.append(state_mod.build(meta, observations, rules.load(data_dir)))
+
+    print(f"带胜负标签且有观测的比赛：{len(games)} 场")
+    try:
+        trained = model.train(games)
+    except model.TrainingRefused as err:
+        print()
+        print(f"❌ {err}")
+        return 1
+
+    out = paths.ensure(data_dir / "kpl") / "model.json"
+    with out.open("w", encoding="utf-8") as handle:
+        json.dump(trained, handle, ensure_ascii=False, indent=2)
+    print(f"✅ 已训练并保存：{out}")
+    print(f"   {trained['games']} 场 / {trained['frames']} 帧    "
+          f"训练集准确率 {trained['trainAccuracy']}")
+    print(f"   ⚠️  {trained['warning']}")
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     from . import server
     server.serve(paths.find_data_dir(args.data), port=args.port)
@@ -419,6 +506,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--calibrate", action="store_true",
                    help="识别结果合理的话，把当前阈值标记为已标定")
     p.set_defaults(func=cmd_minimap)
+
+    p = sub.add_parser("curve", help="胜率曲线与拐点（没有训练好的模型时用假设基线）")
+    p.add_argument("game_id")
+    p.add_argument("--top", type=int, default=5, help="展开前几个拐点，默认 5")
+    p.set_defaults(func=cmd_curve)
+
+    p = sub.add_parser("train", help="训练 V(s)。数据不够会拒绝 —— 那是设计不是故障")
+    p.set_defaults(func=cmd_train)
 
     p = sub.add_parser("serve", help="打开网页控制台（推荐）")
     p.add_argument("--port", type=int, default=8020,
