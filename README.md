@@ -36,7 +36,7 @@ python3 -m kplab serve      # 打开 http://127.0.0.1:8020
 
 **不需要装 ffmpeg，也不需要装任何识别工具就能开始标注。**
 
-接手这个项目（人或 AI）请先跑一遍测试，47 个应该全过：
+接手这个项目（人或 AI）请先跑一遍测试，50 个应该全过：
 
 ```bash
 python3 -m unittest discover -s tests -v
