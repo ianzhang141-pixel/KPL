@@ -29,6 +29,7 @@ import math
 import shutil
 import subprocess
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -118,6 +119,33 @@ def _run(cmd: list[str], timeout: int = 600) -> subprocess.CompletedProcess[str]
         raise VideoError(INSTALL_HINT) from err
     except subprocess.TimeoutExpired as err:
         raise VideoError(f"ffmpeg 执行超过 {timeout} 秒还没结束，已中断。") from err
+
+
+def _run_cancelable(cmd: list[str], timeout: int, should_cancel: Any = None) -> subprocess.CompletedProcess[str]:
+    """运行短ffmpeg任务；服务停止时立刻终止子进程，而不是等线程池退出。"""
+    try:
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except FileNotFoundError as err:
+        raise VideoError(INSTALL_HINT) from err
+    started = time.monotonic()
+    while True:
+        if should_cancel and should_cancel():
+            process.terminate()
+            try:
+                stdout, stderr = process.communicate(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate()
+            return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+        if time.monotonic() - started > timeout:
+            process.kill()
+            stdout, stderr = process.communicate()
+            raise VideoError(f"ffmpeg 执行超过 {timeout} 秒还没结束，已中断。")
+        try:
+            stdout, stderr = process.communicate(timeout=0.5)
+            return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+        except subprocess.TimeoutExpired:
+            continue
 
 
 @dataclass
@@ -380,6 +408,7 @@ def sparse_seek_frames(
     mode: str = "fixed",
     relative_timestamps: bool = False,
     file_prefix: str = "scout",
+    should_cancel: Any = None,
 ) -> list[dict[str, Any]]:
     """对超长回放做稀疏随机定位，不顺序下载或解码整段录像。
 
@@ -422,7 +451,7 @@ def sparse_seek_frames(
                        "-i", media_source, "-frames:v", "1", "-an",
                        "-vf", f"scale={width}:-2", "-q:v", str(quality),
                        "-y", str(target)]
-            result = _run(command, timeout=60)
+            result = _run_cancelable(command, timeout=60, should_cancel=should_cancel)
             if result.returncode != 0 or not target.is_file():
                 return index, record_at, target, result.stderr.strip()[-300:] or "侦察点没有画面"
         return index, record_at, target, None
