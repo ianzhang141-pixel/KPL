@@ -18,10 +18,11 @@
           background:#3b82f6; color:#fff; font-size:12px; font-weight:700;
           align-items:center; justify-content:center; flex:none; }
   .step.done { background:#16a34a; } .step.wait { background:#3a4150; }
-  input[type=text], input[type=number], select {
+  input[type=text], input[type=number], select, textarea {
     background:#0f1216; border:1px solid #2f3644; color:#e6e9ef; border-radius:7px;
     padding:9px 11px; font:inherit; font-size:13px; width:100%; }
-  input:focus, select:focus { outline:none; border-color:#3b82f6; }
+  input:focus, select:focus, textarea:focus { outline:none; border-color:#3b82f6; }
+  textarea { min-height:118px; resize:vertical; }
   label { display:block; color:#8b93a1; font-size:12px; margin:0 0 5px; }
   .row { display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; margin-bottom:10px; }
   .row > div { flex:1; min-width:130px; }
@@ -113,9 +114,10 @@
 
 <div class="card">
   <h2><span class="step" id="s2">2</span> 环境自检</h2>
-  <p class="hint">这两项都不是必需的 —— 人工标注那条路一样东西都不用装，而且必须先走。</p>
+  <p class="hint">这些自动化能力都不是人工标注的前置条件；缺少某项时，页面会明确显示受影响的功能。</p>
   <table>
     <tr><td style="width:170px">抽帧（ffmpeg）</td><td id="envFfmpeg">—</td></tr>
+    <tr><td>网页录像解析（yt-dlp）</td><td id="envResolver">—</td></tr>
     <tr><td>自动识别</td><td id="envOcr">—</td></tr>
     <tr><td>游戏常量</td><td id="envRules">—</td></tr>
     <tr><td>HUD 标定</td><td id="envHud">—</td></tr>
@@ -162,10 +164,46 @@
 </div>
 
 <div class="card">
-  <h2><span class="step" id="s4">4</span> 批量选择录像并在本机智能抽帧<span class="pill on">不复制整段录像</span></h2>
+  <h2><span class="step wait" id="sRemote">4</span> 添加网络录像来源<span class="pill on">流式处理</span></h2>
+  <p class="hint">
+    每行粘贴一个 B站、虎牙、斗鱼网页或直接 MP4、m3u8 地址。系统先展示解析结果，
+    确认后再建立批次；真实媒体地址只在任务执行时临时使用，不长期保存。
+  </p>
+  <div class="privacy">🔒 不保存完整远程录像；只保留用于核对的稀疏证据帧和结构化结果。不会绕过登录权限、付费限制或 DRM。</div>
+  <div class="row">
+    <div style="flex:3"><label>录像网址（每行一个）</label>
+      <textarea id="sourceUrls" placeholder="https://www.bilibili.com/video/...&#10;https://v.douyu.com/...&#10;https://.../master.m3u8"></textarea>
+    </div>
+    <div>
+      <label>使用已有浏览器登录状态</label>
+      <select id="cookieBrowser">
+        <option value="">不使用登录状态</option>
+        <option value="safari">Safari</option>
+        <option value="chrome">Chrome</option>
+        <option value="firefox">Firefox</option>
+        <option value="edge">Edge</option>
+      </select>
+      <label style="margin-top:10px">批量清单</label>
+      <input type="file" id="sourceListFile" accept=".txt,.csv,text/plain,text/csv">
+    </div>
+  </div>
+  <div class="row">
+    <div style="flex:0"><button id="sourcePreviewButton" onclick="previewSources()">分析网址</button></div>
+    <div style="flex:0"><button id="sourceStartButton" onclick="startSourceBatch()" disabled>创建批次并开始流式分析</button></div>
+  </div>
+  <div class="msg" id="sourceMsg"></div>
+  <table class="queue" id="sourceTable" style="display:none">
+    <thead><tr><th></th><th>状态</th><th>平台</th><th>标题</th><th>时长</th><th>分P</th><th>重复</th></tr></thead>
+    <tbody id="sourceRows"></tbody>
+  </table>
+  <pre class="log" id="sourceJobLog" style="display:none"></pre>
+</div>
+
+<div class="card">
+  <h2><span class="step" id="s4">5</span> 批量选择本地录像并智能抽帧<span class="pill on">不复制整段录像</span></h2>
   <p class="hint">
     可一次拖入多段录像，系统会自动逐场建档。智能模式按比赛阶段使用前期8秒、
-    中期5秒、后期3秒的最大间隔，并在画面明显变化的区间补帧。
+    中期5秒、后期3秒的最大间隔；本地浏览器处理还会每2秒扫描一次明显画面变化并补帧。
   </p>
   <div class="privacy">🔒 本地处理：页面只把抽出的 JPEG 图片交给运行在 127.0.0.1 的本地系统。</div>
   <div class="row">
@@ -208,7 +246,7 @@
 </div>
 
 <div class="card">
-  <h2><span class="step wait" id="s5">5</span> 比赛清单</h2>
+  <h2><span class="step wait" id="s5">6</span> 比赛清单</h2>
   <p class="hint">
     「标注」是人工填的，完全可信；「观测」包含人工和机器识别两种。
     <b>先标注，再考虑自动识别</b> —— 没有人工标注就无法验证识别准不准。
@@ -243,6 +281,7 @@
 <script>
 const $ = id => document.getElementById(id);
 let STATUS = null, jobTimer = null, localVideoFiles = [], localVideoUrl = null;
+let sourcePreviewItems = [], sourceCsvText = '';
 let localExtractCancelled = false;
 const sampleWeights = {professional_match:1.5, pro_player_ranked:1.2,
   top_player_ranked:1.0, scrim:1.2, other:0.6};
@@ -294,6 +333,71 @@ function sampleTypeChanged() {
 
 function samplingModeChanged() {
   $('exEvery').disabled = $('samplingMode').value !== 'fixed';
+}
+
+function sourcePlatformLabel(value) {
+  return ({bilibili:'Bilibili', huya:'虎牙', douyu:'斗鱼', direct:'直接视频',
+    web:'其他网页', local:'本地文件', unknown:'未知'})[value] || value || '未知';
+}
+
+function renderSourcePreview(items) {
+  sourcePreviewItems = items || [];
+  $('sourceTable').style.display = sourcePreviewItems.length ? 'table' : 'none';
+  $('sourceRows').innerHTML = sourcePreviewItems.map((item, index) => {
+    const ready = item.status === 'READY';
+    const duplicate = item.duplicateGameId || '';
+    const checked = ready && !duplicate ? 'checked' : '';
+    return `<tr>
+      <td><input type="checkbox" class="source-choice" data-index="${index}" ${checked} ${ready ? '' : 'disabled'}></td>
+      <td class="${ready ? 'status-done' : 'status-error'}">${ready ? '可处理' : safe(item.error || '失败')}</td>
+      <td>${safe(sourcePlatformLabel(item.platform))}</td>
+      <td title="${safe(item.originUrl)}">${safe(item.title || item.originUrl)}</td>
+      <td>${item.durationSec ? clock(item.durationSec) : '执行时读取'}</td>
+      <td>${item.playlistCount > 1 ? `${item.playlistIndex}/${item.playlistCount}` : '—'}</td>
+      <td>${duplicate ? `<span class="warn">已有 ${safe(duplicate)}，默认跳过</span>` : '—'}</td>
+    </tr>`;
+  }).join('');
+  $('sourceStartButton').disabled = !sourcePreviewItems.some(item => item.status === 'READY' && !item.duplicateGameId);
+}
+
+async function previewSources() {
+  const text = $('sourceUrls').value.trim();
+  if (!text && !sourceCsvText) { msg('sourceMsg', '请粘贴网址或导入TXT/CSV清单。', 'err'); return; }
+  $('sourcePreviewButton').disabled = true;
+  $('sourceStartButton').disabled = true;
+  msg('sourceMsg', '正在识别来源并读取标题、时长和分P信息…', 'ok');
+  try {
+    const result = await api('/api/source/preview', {text, csvText:sourceCsvText,
+      cookieBrowser:$('cookieBrowser').value});
+    if (!result.ok) throw new Error(result.error || '解析失败。');
+    renderSourcePreview(result.items);
+    const summary = Object.entries(result.platformCounts || {})
+      .map(([platform, count]) => `${sourcePlatformLabel(platform)} ${count}`).join('，');
+    msg('sourceMsg', `共识别 ${result.items.length} 项：可处理 ${result.resolved}，失败 ${result.failed}` +
+      (summary ? `\n${summary}` : ''), result.failed ? 'warn' : 'ok');
+  } catch (error) {
+    renderSourcePreview([]);
+    msg('sourceMsg', error.message, 'err');
+  } finally {
+    $('sourcePreviewButton').disabled = false;
+  }
+}
+
+async function startSourceBatch() {
+  const selected = Array.from(document.querySelectorAll('.source-choice:checked'))
+    .map(box => sourcePreviewItems[Number(box.dataset.index)]).filter(Boolean);
+  if (!selected.length) { msg('sourceMsg', '没有选中可处理的录像。', 'err'); return; }
+  const result = await api('/api/source/start', {...sampleMetadata(),
+    batchPrefix:$('batchPrefix').value.trim(), items:selected,
+    cookieBrowser:$('cookieBrowser').value, samplingMode:$('samplingMode').value,
+    everySec:parseFloat($('exEvery').value) || 5,
+    startSec:parseFloat($('exStart').value) || 0, endSec:$('exEnd').value});
+  if (!result.started) { msg('sourceMsg', result.reason || '批次启动失败。', 'err'); return; }
+  $('sourceStartButton').disabled = true;
+  $('sourceJobLog').style.display = 'block';
+  msg('sourceMsg', `批次 ${result.batchId} 已启动：创建 ${result.count} 项，跳过 ${result.skipped} 项。`, 'ok');
+  if (jobTimer) clearInterval(jobTimer);
+  jobTimer = setInterval(pollJob, 900);
 }
 
 function chooseVideos(files) {
@@ -507,6 +611,15 @@ async function refresh() {
     ? `<span class="pill on">已安装</span> <code>${v.ffmpeg}</code>`
     : `<span class="pill off">未安装</span> 不影响人工标注，只是不能自动抽帧。<code>brew install ffmpeg</code>`;
 
+  const vs = STATUS.videoSources || {};
+  $('envResolver').innerHTML = vs.webPages
+    ? `<span class="pill on">解析器已就绪</span> 实际访问取决于平台限制和所选浏览器的登录状态。`
+    : `<span class="pill off">未安装</span> 直接 MP4/m3u8 可用；网页地址暂不能解析。`;
+  $('sRemote').className = 'step ' + ((STATUS.sourceBatches || []).length ? 'done' : 'wait');
+  if (!vs.webPages && !$('sourceMsg').textContent) {
+    msg('sourceMsg', '直接 MP4 和 m3u8 已可流式处理；B站、虎牙、斗鱼网页需要安装 yt-dlp。', 'warn');
+  }
+
   const o = STATUS.ocr;
   $('envOcr').innerHTML = o.autoAvailable
     ? `<span class="pill on">${o.autoBackend}</span> 识别结果仍需抽样核对。`
@@ -514,8 +627,8 @@ async function refresh() {
 
   const r = STATUS.rules;
   $('envRules').innerHTML = r.unverifiedCount
-    ? `<span class="pill off">${r.unverifiedCount} 条待核对</span> 见页面最下方。`
-    : `<span class="pill on">已全部核对</span>`;
+    ? `<span class="pill off">${r.unverifiedCount} 条核心常量待核对</span> 见页面最下方。`
+    : `<span class="pill on">核心常量已核对</span> 赛季规则中的歧义项仍会单独标明。`;
   $('s2').className = 'step ' + (r.unverifiedCount ? '' : 'done');
 
   const season = STATUS.seasonRules || {rules:[]};
@@ -624,10 +737,17 @@ async function extract() {
 }
 async function pollJob() {
   const job = await api('/api/job');
-  $('jobLog').textContent =
-    (job.total ? `进度 ${job.done}/${job.total}\n` : '') + (job.lines || []).join('\n');
+  const text = (job.total ? `进度 ${Number(job.done).toFixed(1)}/${job.total}\n` : '') +
+    (job.lines || []).join('\n');
+  $('jobLog').textContent = text;
+  $('sourceJobLog').textContent = text;
   $('jobLog').scrollTop = $('jobLog').scrollHeight;
-  if (!job.running && job.finished) { clearInterval(jobTimer); jobTimer = null; refresh(); }
+  $('sourceJobLog').scrollTop = $('sourceJobLog').scrollHeight;
+  if (!job.running && job.finished) {
+    clearInterval(jobTimer); jobTimer = null;
+    $('sourceStartButton').disabled = false;
+    await refresh();
+  }
 }
 
 refresh();
@@ -641,6 +761,19 @@ drop.addEventListener('keydown', event => {
   }
 });
 $('videoFile').addEventListener('change', event => chooseVideos(event.target.files));
+$('sourceListFile').addEventListener('change', async event => {
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
+  const text = await file.text();
+  if (file.name.toLowerCase().endsWith('.csv')) {
+    sourceCsvText = text;
+    msg('sourceMsg', `已读取CSV清单：${file.name}。点击“分析网址”继续。`, 'ok');
+  } else {
+    sourceCsvText = '';
+    $('sourceUrls').value = text;
+    msg('sourceMsg', `已读取TXT清单：${file.name}。点击“分析网址”继续。`, 'ok');
+  }
+});
 for (const name of ['dragenter', 'dragover']) {
   drop.addEventListener(name, event => {
     event.preventDefault();

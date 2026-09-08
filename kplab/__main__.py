@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 from . import (__version__, annotate, check, evaluate, hud, minimap, ocr, paths,
-               rules, schema, state as state_mod, store, video)
+               rules, schema, sources, state as state_mod, store, video)
 
 
 def cmd_where(args: argparse.Namespace) -> int:
@@ -62,6 +62,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if not info["ok"]:
         for line in info["hint"].splitlines():
             print(f"    {line}")
+
+    source_info = sources.available()
+    print(f"网页录像解析（yt-dlp）："
+          f"{'✅ ' + (source_info['ytDlp'] or '') if source_info['webPages'] else '❌ 未安装'}")
+    if not source_info["webPages"]:
+        print("    安装：brew install yt-dlp")
 
     print()
     print("自动识别后端：")
@@ -213,7 +219,7 @@ def _print_frame(built: dict, minute: float) -> None:
         team = frame["teams"][team_id]
         print(f"{label}  经济 {show(team['totalGold']):>7}  击杀 {show(team['kills']):>3}  "
               f"塔 {show(team['towers'])}  暴君 {show(team['tyrants'])}  "
-              f"黑暗暴君 {show(team['darkTyrants'])}  主宰 {show(team['overlords'])}  "
+              f"暗影暴君 {show(team['darkTyrants'])}  主宰 {show(team['overlords'])}  "
               f"风暴龙王 {show(team['stormDragons'])}")
     print(f"经济差（蓝-红）：{show(frame['diff']['totalGold'])}")
     print("-" * 78)

@@ -13,13 +13,15 @@ import json
 import math
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (__version__, annotate, check, evaluate, hud, minimap, ocr, paths,
-               rules, samples, schema, season_s44, state as state_mod, store, video)
+               rules, samples, schema, season_s44, sources, state as state_mod,
+               store, video)
 
 WEB_DIR = Path(__file__).parent / "web"
 MAX_BODY = 4 * 1024 * 1024
@@ -103,6 +105,8 @@ def api_status() -> dict[str, Any]:
         "inventory": store.inventory(data_dir) if data_dir.is_dir() else
                      {"games": [], "total": 0, "totalBytesHuman": "0 B"},
         "video": video.available(),
+        "videoSources": sources.available(),
+        "sourceBatches": sources.list_batches(data_dir),
         "ocr": ocr.status(),
         "rules": {
             "unverified": pending,
@@ -198,6 +202,252 @@ def api_sampling_plan(body: dict[str, Any]) -> dict[str, Any]:
     except video.VideoError as err:
         return {"ok": False, "error": str(err)}
     return {"ok": True, **plan}
+
+
+def api_source_preview(body: dict[str, Any]) -> dict[str, Any]:
+    """解析多行网址/CSV，逐项返回；一个坏网址不影响其余项目。"""
+    try:
+        entries = sources.parse_submission(body.get("text"), body.get("csvText"))
+    except sources.SourceError as err:
+        return {"ok": False, "errorCode": err.code,
+                "error": sources.ERROR_MESSAGES[err.code]}
+    cookie_browser = str(body.get("cookieBrowser") or "").lower()
+    if cookie_browser not in sources.COOKIE_BROWSERS:
+        return {"ok": False, "errorCode": "INVALID_SOURCE",
+                "error": "不支持这个浏览器登录状态。"}
+
+    def resolve_entry(pair: tuple[int, dict[str, Any]]) -> list[dict[str, Any]]:
+        input_index, entry = pair
+        origin = entry["originUrl"]
+        try:
+            resolved_items = sources.resolve(origin, cookie_browser,
+                                             metadata=entry.get("metadata") or {})
+            output: list[dict[str, Any]] = []
+            for resolved in resolved_items:
+                public = resolved.public()
+                public.update({
+                    "inputIndex": input_index,
+                    "status": "READY",
+                    "duplicateGameId": sources.find_duplicate(
+                        _console().data_dir, resolved.mediaFingerprint
+                    ),
+                })
+                output.append(public)
+            return output
+        except sources.SourceError as err:
+            try:
+                detected = sources.detect(origin)
+            except sources.SourceError:
+                detected = {"platform": "unknown", "sourceType": "INVALID_SOURCE",
+                            "originUrl": str(origin)}
+            return [{
+                **detected, "inputIndex": input_index, "title": "无法解析",
+                "status": "FAILED", "errorCode": err.code,
+                "error": sources.ERROR_MESSAGES[err.code],
+                "metadata": entry.get("metadata") or {}, "sourceUrlStored": False,
+            }]
+
+    # 解析时间主要消耗在等待平台响应。并发限制为4，既缩短大清单预览时间，
+    # 又避免对网站和本机造成过高瞬时压力；map 保持用户提交的原始顺序。
+    workers = min(4, len(entries))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="source-preview") as pool:
+        groups = pool.map(resolve_entry, enumerate(entries, 1))
+        items = [item for group in groups for item in group]
+    counts: dict[str, int] = {}
+    for item in items:
+        key = str(item.get("platform") or "unknown")
+        counts[key] = counts.get(key, 0) + 1
+    return {"ok": True, "submitted": len(entries), "items": items,
+            "resolved": sum(1 for item in items if item["status"] == "READY"),
+            "failed": sum(1 for item in items if item["status"] == "FAILED"),
+            "platformCounts": counts}
+
+
+def _source_batch_id(data_dir: Path) -> str:
+    base = time.strftime("SOURCE_%Y%m%d_%H%M%S")
+    candidate, suffix = base, 2
+    while sources.batch_path(data_dir, candidate).exists():
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    return candidate
+
+
+def api_source_start(body: dict[str, Any]) -> dict[str, Any]:
+    """创建远程来源批次，并用一条连续媒体流逐场处理。"""
+    if _console().snapshot().get("running"):
+        return {"started": False, "reason": "已有任务正在运行，请等它完成。"}
+    requested = body.get("items")
+    if not isinstance(requested, list) or not requested:
+        return {"started": False, "reason": "请先解析并选择至少一个录像来源。"}
+    if len(requested) > sources.MAX_SOURCES:
+        return {"started": False, "reason": f"一次最多处理{sources.MAX_SOURCES}个来源。"}
+    try:
+        common = samples.normalize_metadata(body)
+    except samples.SampleError as err:
+        return {"started": False, "reason": str(err)}
+    try:
+        every = float(body.get("everySec") or 5)
+        start_sec = float(body.get("startSec") or 0)
+        end_value = body.get("endSec")
+        end_sec = float(end_value) if end_value not in (None, "") else None
+    except (TypeError, ValueError):
+        return {"started": False, "reason": "抽帧范围必须是数字。"}
+    if (not math.isfinite(every) or not math.isfinite(start_sec) or every <= 0
+            or start_sec < 0 or (end_sec is not None and
+                                 (not math.isfinite(end_sec) or end_sec <= start_sec))):
+        return {"started": False, "reason": "抽帧起止时间或间隔不合法。"}
+    mode = str(body.get("samplingMode") or "smart")
+    if mode not in video.SAMPLING_MODES:
+        return {"started": False, "reason": "不支持这种抽帧方式。"}
+    cookie_browser = str(body.get("cookieBrowser") or "").lower()
+    if cookie_browser not in sources.COOKIE_BROWSERS:
+        return {"started": False, "reason": "不支持这个浏览器登录状态。"}
+
+    data_dir = paths.ensure(_console().data_dir)
+    batch_id = _source_batch_id(data_dir)
+    prefix = str(body.get("batchPrefix") or batch_id)
+    jobs: list[dict[str, Any]] = []
+    created: list[dict[str, Any]] = []
+    for index, raw in enumerate(requested, 1):
+        if not isinstance(raw, dict) or raw.get("status") not in (None, "READY"):
+            continue
+        try:
+            detected = sources.detect(raw.get("originUrl"))
+        except sources.SourceError:
+            continue
+        fingerprint = str(raw.get("mediaFingerprint") or "")[:64]
+        duplicate = sources.find_duplicate(data_dir, fingerprint)
+        if duplicate and not bool(body.get("allowDuplicates")):
+            continue
+        game_id = store.next_game_id(data_dir, prefix, index)
+        csv_meta = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+        title = str(raw.get("title") or f"远程录像{index}")[:300]
+        meta = {
+            **common,
+            "title": title,
+            "sourceKind": "remote-stream",
+            "videoImportMode": "remote-stream-no-full-copy",
+            "originUrl": detected["originUrl"],
+            "sourceType": detected["sourceType"],
+            "sourcePlatform": str(raw.get("platform") or detected["platform"])[:40],
+            "resolverName": str(raw.get("resolverName") or "")[:80],
+            "mediaFingerprint": fingerprint,
+            "sourceUrlStored": False,
+            "sourceBatchId": batch_id,
+            "playlistIndex": raw.get("playlistIndex"),
+            "blueTeam": str(csv_meta.get("team") or "")[:80],
+            "redTeam": str(csv_meta.get("opponent") or "")[:80],
+            "tournament": str(csv_meta.get("event") or common.get("tournament") or "")[:100],
+            "matchDate": str(csv_meta.get("date") or "")[:40],
+            "note": str(csv_meta.get("note") or "")[:500],
+        }
+        store.create_game(data_dir, game_id, meta)
+        job = {
+            "id": f"{batch_id}_{index:03d}", "batchId": batch_id,
+            "gameId": game_id, "originUrl": detected["originUrl"],
+            "platform": meta["sourcePlatform"], "sourceType": detected["sourceType"],
+            "title": title, "playlistIndex": raw.get("playlistIndex"),
+            "mediaFingerprint": fingerprint, "status": "PENDING", "stage": "QUEUED",
+            "progress": 0.0, "currentVideoTime": 0.0, "attemptCount": 0,
+            "errorCode": None, "errorMessage": None,
+            "createdAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "startedAt": None, "finishedAt": None, "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        jobs.append(job)
+        created.append({"gameId": game_id, "title": title, "index": index})
+    if not jobs:
+        return {"started": False, "reason": "没有可创建的任务；失败项或重复录像已自动跳过。"}
+    batch = {"batchId": batch_id, "createdAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+             "cookieBrowser": cookie_browser or None, "sourceUrlStored": False, "jobs": jobs}
+    sources.save_batch(data_dir, batch)
+
+    def work(log: Callable[[str], None]) -> None:
+        cleaned = sources.cleanup_cache(data_dir)
+        if cleaned["removedFiles"]:
+            log(f"已清理 {cleaned['removedFiles']} 个过期临时缓存文件。")
+        completed = failed = 0
+        _console().progress(0, len(jobs))
+        for job_index, job in enumerate(jobs, 1):
+            job.update({"status": "RUNNING", "stage": "RESOLVING",
+                        "startedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+            sources.save_batch(data_dir, batch)
+            log(f"[{job_index}/{len(jobs)}] 解析来源：{job['title']}")
+            last_error_code = "RESOLVER_ERROR"
+            last_error_message = "无法处理该录像。"
+            for attempt in range(1, sources.MAX_RESOLVE_RETRIES + 1):
+                job["attemptCount"] = attempt
+                job["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+                try:
+                    resolved_list = sources.resolve(
+                        job["originUrl"], cookie_browser,
+                        int(job["playlistIndex"]) if job.get("playlistIndex") else None,
+                    )
+                    resolved = resolved_list[0]
+                    if not resolved.sourceUrl:
+                        raise sources.SourceError("NO_VIDEO_STREAM")
+                    job["stage"] = "PROBING"
+                    sources.save_batch(data_dir, batch)
+                    info = video.probe_input(resolved.sourceUrl, resolved.headers)
+                    if info.durationSec <= 0:
+                        raise video.VideoError("无法确认录像时长；暂不处理直播或无限流。")
+                    job["stage"] = "STREAMING"
+                    log(f"开始流式分析：{info.width}×{info.height}，{info.durationSec / 60:.1f}分钟")
+
+                    def progress(done: int, total: int, at_sec: float) -> None:
+                        job["progress"] = round(done / max(1, total), 4)
+                        job["currentVideoTime"] = round(at_sec, 3)
+                        _console().progress(job_index - 1 + job["progress"], len(jobs))
+                        if done == 1 or done == total or done % 10 == 0:
+                            job["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+                            sources.save_batch(data_dir, batch)
+
+                    records = video.stream_extract_frames(
+                        resolved.sourceUrl, store.frames_dir(data_dir, job["gameId"]),
+                        info.durationSec, mode, every, start_sec, end_sec,
+                        headers=resolved.headers, on_progress=progress,
+                    )
+                    store.create_game(data_dir, job["gameId"], {
+                        "videoDurationSec": round(info.durationSec, 3),
+                        "videoWidth": info.width, "videoHeight": info.height,
+                        "samplingMode": mode, "frameEverySec": every if mode == "fixed" else None,
+                        "savedFrameCount": len(records), "sourceResolvedAt": resolved.resolvedAt,
+                        "sourceUrlStored": False, "fullVideoStored": False,
+                    })
+                    job.update({"status": "DONE", "stage": "COMPLETE", "progress": 1.0,
+                                "currentVideoTime": round(info.durationSec, 3),
+                                "errorCode": None, "errorMessage": None,
+                                "finishedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+                    completed += 1
+                    log(f"✅ {job['gameId']}：保存 {len(records)} 张稀疏证据帧，没有保存完整录像。")
+                    break
+                except sources.SourceError as err:
+                    last_error_code = err.code
+                    last_error_message = sources.ERROR_MESSAGES[err.code]
+                    if err.code not in {"NETWORK_ERROR", "MEDIA_URL_EXPIRED"}:
+                        break
+                    log(f"第{attempt}次解析失败，将重新获取媒体地址。")
+                except video.VideoError as err:
+                    last_error_code = sources.classify_media_error(err)
+                    last_error_message = sources.safe_error(err)
+                    if (last_error_code in {"NETWORK_ERROR", "MEDIA_URL_EXPIRED"}
+                            and attempt < sources.MAX_RESOLVE_RETRIES):
+                        log(f"媒体流中断，第{attempt}次重新解析原始网页地址。")
+                    else:
+                        break
+            if job.get("status") != "DONE":
+                job.update({"status": "FAILED", "stage": "FAILED",
+                            "errorCode": last_error_code, "errorMessage": last_error_message,
+                            "finishedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+                failed += 1
+                log(f"❌ {job['gameId']}：{last_error_message} 后续任务继续。")
+            job["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            sources.save_batch(data_dir, batch)
+            _console().progress(job_index, len(jobs))
+        log(f"批次完成：成功{completed}个，失败{failed}个。")
+
+    started = _console().start_job(f"流式录像批次：{batch_id}", work)
+    return {**started, "batchId": batch_id, "created": created,
+            "count": len(created), "skipped": len(requested) - len(created)}
 
 
 def api_delete_game(body: dict[str, Any]) -> dict[str, Any]:
@@ -556,6 +806,8 @@ class Handler(BaseHTTPRequestHandler):
             "/api/minimap/save": api_minimap_save,
             "/api/video/register": api_register_browser_video,
             "/api/video/plan": api_sampling_plan,
+            "/api/source/preview": api_source_preview,
+            "/api/source/start": api_source_start,
         }
         handler = routes.get(path)
         if not handler:
@@ -660,6 +912,9 @@ def serve(data_dir: Path, port: int = 8020) -> None:
     print(f"  版本：kplab {__version__}")
     print(f"  数据目录：{data_dir}")
     print(f"  抽帧（ffmpeg）：{'可用' if video.available()['ok'] else '未安装 —— 不影响人工标注'}")
+    source_info = sources.available()
+    print(f"  网页录像解析（yt-dlp）："
+          f"{'可用' if source_info['webPages'] else '未安装 —— 直接媒体地址仍可使用'}")
     auto = ocr.best_backend()
     print(f"  自动识别：{auto if auto else '无可用后端 —— 不影响人工标注'}")
     print()

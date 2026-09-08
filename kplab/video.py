@@ -28,13 +28,44 @@ import json
 import math
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 
 class VideoError(RuntimeError):
     pass
+
+
+class FrameDispatcher:
+    """把同一条解码流按各模块所需频率分发，避免重复解码。"""
+
+    def __init__(self) -> None:
+        self._consumers: dict[str, dict[str, Any]] = {}
+
+    def subscribe(self, name: str, every_sec: float, callback: Any) -> None:
+        interval = float(every_sec)
+        if not name or interval < 0 or not math.isfinite(interval) or not callable(callback):
+            raise ValueError("帧消费者名称、间隔或回调不合法。")
+        self._consumers[name] = {"everySec": interval, "lastAt": None,
+                                 "callback": callback, "delivered": 0}
+
+    def dispatch(self, at_sec: float, frame: bytes) -> list[str]:
+        delivered: list[str] = []
+        for name, consumer in self._consumers.items():
+            last = consumer["lastAt"]
+            if last is not None and at_sec - last + 1e-9 < consumer["everySec"]:
+                continue
+            consumer["callback"](at_sec, frame)
+            consumer["lastAt"] = at_sec
+            consumer["delivered"] += 1
+            delivered.append(name)
+        return delivered
+
+    def counts(self) -> dict[str, int]:
+        return {name: int(value["delivered"]) for name, value in self._consumers.items()}
 
 
 BROWSER_FRAME_MAX_BYTES = 8 * 1024 * 1024
@@ -138,6 +169,199 @@ def probe(video: Path) -> VideoInfo:
     if width <= 0 or height <= 0:
         raise VideoError("这个文件里没有视频流（宽高读出来是 0）。")
     return VideoInfo(str(video), duration, width, height, fps)
+
+
+def _remote(value: str) -> bool:
+    return urlsplit(value).scheme.lower() in {"http", "https"}
+
+
+def _header_argument(headers: dict[str, str] | None) -> str:
+    """生成 ffmpeg 请求头；认证字段只在内存中传递，调用方不得记录。"""
+    if not headers:
+        return ""
+    lines: list[str] = []
+    for key, value in headers.items():
+        clean_key = str(key).replace("\r", "").replace("\n", "").strip()
+        clean_value = str(value).replace("\r", "").replace("\n", "").strip()
+        if clean_key and clean_value:
+            lines.append(f"{clean_key}: {clean_value}")
+    return "\r\n".join(lines) + ("\r\n" if lines else "")
+
+
+def _input_options(source: str, headers: dict[str, str] | None = None) -> list[str]:
+    options: list[str] = []
+    if _remote(source):
+        options += ["-reconnect", "1", "-reconnect_streamed", "1",
+                    "-reconnect_delay_max", "8"]
+    header_text = _header_argument(headers)
+    if header_text:
+        options += ["-headers", header_text]
+    return options
+
+
+def probe_input(source: str | Path, headers: dict[str, str] | None = None) -> VideoInfo:
+    """读取本地或远程媒体信息，不把远程媒体保存到磁盘。"""
+    raw = str(source)
+    if not _remote(raw):
+        return probe(Path(raw))
+    exe = ffprobe_path()
+    if not exe:
+        raise VideoError(INSTALL_HINT)
+    result = _run([
+        exe, "-v", "error", *_input_options(raw, headers),
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height,avg_frame_rate,codec_name:format=duration",
+        "-of", "json", raw,
+    ], timeout=60)
+    if result.returncode != 0:
+        detail = result.stderr.strip()[-300:] or "无法访问远程媒体"
+        raise VideoError(f"读取远程录像失败：{detail}")
+    try:
+        parsed = json.loads(result.stdout)
+        stream = (parsed.get("streams") or [{}])[0]
+        duration = float((parsed.get("format") or {}).get("duration") or 0.0)
+        width, height = int(stream.get("width") or 0), int(stream.get("height") or 0)
+        numerator, _, denominator = str(stream.get("avg_frame_rate") or "0/1").partition("/")
+        fps = float(numerator) / float(denominator) if denominator and float(denominator) else 0.0
+    except (ValueError, KeyError, IndexError, ZeroDivisionError) as err:
+        raise VideoError(f"远程录像信息无法识别：{err}") from err
+    if width <= 0 or height <= 0:
+        raise VideoError("远程地址中没有可用的视频画面。")
+    return VideoInfo(raw, duration, width, height, fps)
+
+
+def _jpeg_stream(pipe: Any, maximum_frame_bytes: int = BROWSER_FRAME_MAX_BYTES):
+    buffer = b""
+    while True:
+        chunk = pipe.read(64 * 1024)
+        if not chunk:
+            break
+        buffer += chunk
+        while True:
+            start = buffer.find(b"\xff\xd8")
+            if start < 0:
+                buffer = buffer[-1:]
+                break
+            end = buffer.find(b"\xff\xd9", start + 2)
+            if end < 0:
+                if start:
+                    buffer = buffer[start:]
+                if len(buffer) > maximum_frame_bytes:
+                    raise VideoError("远程帧图超过8 MB，已停止以避免异常占用内存。")
+                break
+            frame = buffer[start:end + 2]
+            buffer = buffer[end + 2:]
+            if len(frame) <= maximum_frame_bytes:
+                yield frame
+
+
+def stream_extract_frames(
+    source: str,
+    out_dir: Path,
+    duration_sec: float,
+    mode: str = "smart",
+    every_sec: float = 5.0,
+    start_sec: float = 0.0,
+    end_sec: float | None = None,
+    width: int = 1280,
+    quality: int = 4,
+    headers: dict[str, str] | None = None,
+    on_progress: Any = None,
+    should_cancel: Any = None,
+) -> list[dict[str, Any]]:
+    """单次连续读取媒体流并保存稀疏证据帧，不生成完整录像副本。
+
+    ffmpeg 只启动一次。未来的小地图、OCR、血量和事件模块应订阅同一条解码流，
+    不得为每个模块重新下载或解码整场录像。
+    """
+    exe = ffmpeg_path()
+    if not exe:
+        raise VideoError(INSTALL_HINT)
+    plan = sampling_plan(duration_sec, start_sec, end_sec, mode, every_sec)
+    start = max(0.0, float(start_sec))
+    end = min(float(duration_sec), float(end_sec)) if end_sec is not None else float(duration_sec)
+    if mode == "smart":
+        # prev_selected_t 让不同阶段使用不同最大间隔，同时保持一次顺序解码。
+        select = (
+            "select=isnan(prev_selected_t)+gte(t-prev_selected_t\\,"
+            f"if(lt(t+{start:.3f}\\,240)\\,8\\,"
+            f"if(lt(t+{start:.3f}\\,600)\\,5\\,3))),scale={width}:-2"
+        )
+    else:
+        interval = 3.0 if mode == "dense" else float(every_sec)
+        select = f"fps=1/{interval:.6f},scale={width}:-2"
+
+    command = [exe, "-nostdin", "-hide_banner", "-loglevel", "error"]
+    if start > 0:
+        command += ["-ss", f"{start:.3f}"]
+    command += _input_options(source, headers)
+    command += ["-i", source, "-t", f"{end - start:.3f}", "-an", "-vf", select,
+                "-fps_mode", "vfr", "-c:v", "mjpeg", "-q:v", str(quality),
+                "-f", "image2pipe", "pipe:1"]
+    try:
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except FileNotFoundError as err:
+        raise VideoError(INSTALL_HINT) from err
+    assert process.stdout is not None and process.stderr is not None
+    error_chunks: list[bytes] = []
+
+    def drain_errors() -> None:
+        while True:
+            chunk = process.stderr.read(4096)
+            if not chunk:
+                return
+            error_chunks.append(chunk)
+            if sum(len(value) for value in error_chunks) > 64 * 1024:
+                del error_chunks[:-4]
+
+    error_thread = threading.Thread(target=drain_errors, daemon=True)
+    error_thread.start()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    records: list[dict[str, Any]] = []
+
+    def save_evidence(at: float, frame: bytes) -> None:
+        index = len(records)
+        target = out_dir / f"stream_{at:010.3f}s.jpg"
+        temporary = target.with_suffix(".jpg.tmp")
+        temporary.write_bytes(frame)
+        temporary.replace(target)
+        records.append({"index": index, "atSec": at, "file": target.name,
+                        "bytes": len(frame)})
+
+    dispatcher = FrameDispatcher()
+    dispatcher.subscribe("evidence-writer", 0, save_evidence)
+    try:
+        for index, frame in enumerate(_jpeg_stream(process.stdout)):
+            if should_cancel and should_cancel():
+                process.terminate()
+                break
+            if index >= len(plan["times"]):
+                process.terminate()
+                break
+            at = float(plan["times"][index])
+            dispatcher.dispatch(at, frame)
+            if on_progress:
+                on_progress(index + 1, len(plan["times"]), at)
+            if len(records) >= MAX_BROWSER_FRAMES:
+                process.terminate()
+                break
+    except Exception:
+        process.terminate()
+        raise
+    finally:
+        process.stdout.close()
+    try:
+        return_code = process.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        return_code = process.wait(timeout=5)
+    error_thread.join(timeout=2)
+    if return_code not in (0, -15):
+        detail = b"".join(error_chunks).decode("utf-8", errors="replace").strip()[-400:]
+        raise VideoError(f"远程录像流式读取失败：{detail or 'ffmpeg 没有输出画面'}")
+    if not records:
+        raise VideoError("远程录像没有产生可用画面。")
+    return records
 
 
 def extract_frames(
