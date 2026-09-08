@@ -16,11 +16,12 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from kplab import annotate, evaluate, ocr, rules, schema, state, store  # noqa: E402
+from kplab import annotate, evaluate, ocr, paths, rules, schema, state, store  # noqa: E402
 
 
 def ocr_field(value, confidence=0.9):
@@ -274,6 +275,39 @@ class RulesAreMarkedUnverified(unittest.TestCase):
         table = rules.load(directory)
         self.assertTrue(table["towersPerLane"]["verified"])
         self.assertNotIn("towersPerLane", rules.unverified(table))
+
+
+class DataDirectoryDiscovery(unittest.TestCase):
+    """数据目录只能在明确的项目/用户范围内查找，绝不能猜中系统目录。"""
+
+    def test_falls_back_to_project_data_not_ancestor_var(self):
+        with tempfile.TemporaryDirectory() as raw:
+            outer = Path(raw)
+            (outer / "var").mkdir()
+            repo = outer / "repo"
+            cwd = repo / "tools"
+            (repo / ".git").mkdir(parents=True)
+            cwd.mkdir()
+            with patch.dict("os.environ", {"KPLAB_DATA": ""}), \
+                    patch.object(paths.Path, "cwd", return_value=cwd):
+                self.assertEqual(paths.find_data_dir(), (repo / "data").resolve())
+
+    def test_existing_project_data_is_found_from_subdirectory(self):
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw) / "repo"
+            cwd = repo / "kplab" / "web"
+            (repo / ".git").mkdir(parents=True)
+            (repo / "data").mkdir()
+            cwd.mkdir(parents=True)
+            with patch.dict("os.environ", {"KPLAB_DATA": ""}), \
+                    patch.object(paths.Path, "cwd", return_value=cwd):
+                self.assertEqual(paths.find_data_dir(), (repo / "data").resolve())
+
+    def test_explicit_path_still_has_highest_priority(self):
+        with tempfile.TemporaryDirectory() as raw:
+            chosen = Path(raw) / "chosen"
+            with patch.dict("os.environ", {"KPLAB_DATA": "/should/not/win"}):
+                self.assertEqual(paths.find_data_dir(str(chosen)), chosen.resolve())
 
 
 if __name__ == "__main__":
