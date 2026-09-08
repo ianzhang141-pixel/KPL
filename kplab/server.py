@@ -379,7 +379,7 @@ def _source_batches_work(data_dir: Path, batches: list[dict[str, Any]]) -> Calla
 
                     if job.get("sourceParentGameId"):
                         records = video.sparse_seek_frames(
-                            resolved.sourceUrl,
+                            resolved.analysisSourceUrl or resolved.sourceUrl,
                             store.frames_dir(data_dir, job["gameId"]),
                             info.durationSec, every_sec=every, width=960,
                             headers=resolved.headers, on_progress=progress,

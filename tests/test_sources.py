@@ -47,12 +47,13 @@ class SourceDetection(unittest.TestCase):
 
 class ResolverBoundaries(unittest.TestCase):
     def test_login_headers_stay_in_memory_for_ffmpeg(self):
-        media_url, scout_url, headers = sources._media_url({
+        media_url, scout_url, analysis_url, headers = sources._media_url({
             "url": "https://signed.example/video.m3u8?token=secret",
             "http_headers": {"Cookie": "session=secret", "Referer": "https://example.com"},
         })
         self.assertIn("token=secret", media_url)
         self.assertIsNone(scout_url)
+        self.assertIsNone(analysis_url)
         self.assertEqual(headers["Cookie"], "session=secret")
 
     def test_public_preview_never_contains_media_url_or_headers(self):
@@ -65,9 +66,22 @@ class ResolverBoundaries(unittest.TestCase):
         public = resolved.public()
         self.assertNotIn("sourceUrl", public)
         self.assertNotIn("scoutSourceUrl", public)
+        self.assertNotIn("analysisSourceUrl", public)
         self.assertNotIn("headers", public)
         self.assertFalse(public["sourceUrlStored"])
         self.assertNotIn("secret", repr(public))
+
+    def test_resolver_uses_low_quality_for_scout_and_720p_for_analysis(self):
+        _media, scout, analysis, _headers = sources._media_url({
+            "url": "https://cdn.example/1080.m3u8",
+            "formats": [
+                {"height": 1080, "url": "https://cdn.example/1080.m3u8"},
+                {"height": 360, "url": "https://cdn.example/360.m3u8"},
+                {"height": 720, "url": "https://cdn.example/720.m3u8"},
+            ],
+        })
+        self.assertIn("360", scout)
+        self.assertIn("720", analysis)
 
     def test_playlist_keeps_original_indexes(self):
         payload = {"entries": [

@@ -65,6 +65,7 @@ class ResolvedVideoSource:
     sourceUrl: str | None
     title: str
     scoutSourceUrl: str | None = field(default=None, repr=False)
+    analysisSourceUrl: str | None = field(default=None, repr=False)
     durationSec: float | None = None
     width: int | None = None
     height: int | None = None
@@ -85,6 +86,7 @@ class ResolvedVideoSource:
         result = asdict(self)
         result.pop("sourceUrl", None)
         result.pop("scoutSourceUrl", None)
+        result.pop("analysisSourceUrl", None)
         result.pop("headers", None)
         result["sourceUrlStored"] = False
         return result
@@ -291,7 +293,7 @@ def _run_ytdlp(origin: str, cookie_browser: str = "") -> dict[str, Any]:
     return payload
 
 
-def _media_url(payload: dict[str, Any]) -> tuple[str | None, str | None, dict[str, str]]:
+def _media_url(payload: dict[str, Any]) -> tuple[str | None, str | None, str | None, dict[str, str]]:
     url = payload.get("url")
     candidates = payload.get("requested_formats") or []
     if not url and isinstance(candidates, list):
@@ -302,6 +304,7 @@ def _media_url(payload: dict[str, Any]) -> tuple[str | None, str | None, dict[st
                                           _number(item.get("tbr")) or 0), reverse=True)
             url = videos[0].get("url")
     scout_url = None
+    analysis_url = None
     formats = payload.get("formats") or []
     if isinstance(formats, list):
         scout_formats = [item for item in formats if isinstance(item, dict)
@@ -310,19 +313,24 @@ def _media_url(payload: dict[str, Any]) -> tuple[str | None, str | None, dict[st
                                              _number(item.get("tbr")) or 100000))
         if scout_formats:
             scout_url = str(scout_formats[0]["url"])
+            analysis_format = min(
+                scout_formats,
+                key=lambda item: abs((_number(item.get("height")) or 720) - 720),
+            )
+            analysis_url = str(analysis_format["url"])
     headers = payload.get("http_headers") if isinstance(payload.get("http_headers"), dict) else {}
     # 登录态请求头可以在解析任务的内存中交给 ffmpeg，但 public()、任务文件和
     # 日志都必须剔除它们。否则“用浏览器登录状态解析”会在取到媒体地址后又因
     # 缺少 Cookie 而播放失败。
     transient_headers = {str(key): str(value) for key, value in headers.items()}
-    return str(url) if url else None, scout_url, transient_headers
+    return str(url) if url else None, scout_url, analysis_url, transient_headers
 
 
 def _from_ytdlp(payload: dict[str, Any], origin: str, platform: str,
                 source_type: str, resolver_name: str,
                 playlist_index: int | None = None, playlist_count: int = 1,
                 metadata: dict[str, Any] | None = None) -> ResolvedVideoSource:
-    source_url, scout_source_url, headers = _media_url(payload)
+    source_url, scout_source_url, analysis_source_url, headers = _media_url(payload)
     webpage = str(payload.get("webpage_url") or origin)
     title = str(payload.get("title") or payload.get("fulltitle") or "未命名录像")[:300]
     video_id = payload.get("id")
@@ -333,6 +341,7 @@ def _from_ytdlp(payload: dict[str, Any], origin: str, platform: str,
         sourceUrl=source_url,
         title=title,
         scoutSourceUrl=scout_source_url,
+        analysisSourceUrl=analysis_source_url,
         durationSec=_number(payload.get("duration")),
         width=_number(payload.get("width"), integer=True),
         height=_number(payload.get("height"), integer=True),
