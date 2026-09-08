@@ -38,6 +38,15 @@ class VideoError(RuntimeError):
 
 
 BROWSER_FRAME_MAX_BYTES = 8 * 1024 * 1024
+MAX_BROWSER_FRAMES = 2000
+MAX_BROWSER_SCAN_POINTS = 12000
+
+
+SAMPLING_MODES = {
+    "smart": "智能战术采样",
+    "dense": "全程3秒精细采样",
+    "fixed": "自定义固定间隔",
+}
 
 
 INSTALL_HINT = (
@@ -198,6 +207,72 @@ def extract_frames(
         at += every_sec
 
     return records
+
+
+def sampling_plan(
+    duration_sec: float,
+    start_sec: float = 0.0,
+    end_sec: float | None = None,
+    mode: str = "smart",
+    every_sec: float = 5.0,
+) -> dict[str, Any]:
+    """生成浏览器抽帧时间表。
+
+    智能模式不冒充“理解了团战”：它保证越到后期基础帧越密，同时让浏览器
+    每2秒做一次低清画面变化扫描，变化明显时保存该帧。0~4分钟基础帧最多
+    隔8秒、4~10分钟最多隔5秒、10分钟后最多隔3秒。
+    """
+    try:
+        duration = float(duration_sec)
+        start = max(0.0, float(start_sec))
+        end = duration if end_sec is None else min(duration, float(end_sec))
+        custom = float(every_sec)
+    except (TypeError, ValueError):
+        raise VideoError("录像时长和抽帧时间必须是数字。") from None
+    if not all(math.isfinite(value) for value in (duration, start, end, custom)):
+        raise VideoError("录像时长和抽帧时间必须是有限数字。")
+    if duration <= 0 or end <= start:
+        raise VideoError("结束时间必须晚于开始时间。")
+    if mode not in SAMPLING_MODES:
+        raise VideoError("不支持这种抽帧模式。")
+    if custom <= 0:
+        raise VideoError("固定抽帧间隔必须大于0秒。")
+
+    times: list[float] = []
+    at = start
+    while at < end:
+        times.append(round(at, 3))
+        if len(times) > MAX_BROWSER_FRAMES:
+            raise VideoError("这段录像会超过2000张基础帧，请缩短范围或放大间隔。")
+        if mode == "smart":
+            interval = 8.0 if at < 240 else 5.0 if at < 600 else 3.0
+        elif mode == "dense":
+            interval = 3.0
+        else:
+            interval = custom
+        at += interval
+    if mode == "smart":
+        scan = {round(value, 3) for value in times}
+        scan_at = start
+        while scan_at < end:
+            scan.add(round(scan_at, 3))
+            if len(scan) > MAX_BROWSER_SCAN_POINTS:
+                raise VideoError("这段录像的智能扫描点过多，请缩短处理范围。")
+            scan_at += 2.0
+        scan_times = sorted(scan)
+    else:
+        scan_times = times
+    return {
+        "mode": mode,
+        "modeLabel": SAMPLING_MODES[mode],
+        "times": times,
+        "baseFrames": len(times),
+        "scanTimes": scan_times,
+        "scanFrames": len(scan_times),
+        "changeScanEverySec": 2 if mode == "smart" else None,
+        "adaptive": mode == "smart",
+        "maximumGapSec": 8 if mode == "smart" else (3 if mode == "dense" else custom),
+    }
 
 
 def save_browser_frame(

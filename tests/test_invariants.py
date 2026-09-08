@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from kplab import annotate, evaluate, ocr, paths, rules, schema, state, store, video  # noqa: E402
+from kplab import annotate, evaluate, ocr, paths, rules, samples, schema, state, store, video  # noqa: E402
 
 
 def ocr_field(value, confidence=0.9):
@@ -334,6 +334,55 @@ class BrowserFrameIngestion(unittest.TestCase):
             for value in (-1, float("nan"), 24 * 60 * 60 + 1):
                 with self.assertRaises(video.VideoError):
                     video.save_browser_frame(Path(raw), value, self.JPEG, "image/jpeg")
+
+
+class SampleLibraryAndSampling(unittest.TestCase):
+    """样本分层和采样密度属于数据契约，不能只存在于页面文字里。"""
+
+    def test_professional_match_keeps_separate_label_and_weight(self):
+        meta = samples.normalize_metadata({
+            "sampleType": "professional_match", "focalTeam": "AG",
+            "tags": "季后赛，逆风局,季后赛",
+        })
+        self.assertTrue(meta["isProfessionalMatch"])
+        self.assertEqual(meta["sampleTypeLabel"], "职业正式比赛")
+        self.assertEqual(meta["trainingWeight"], 1.5)
+        self.assertEqual(meta["tags"], ["季后赛", "逆风局"])
+
+    def test_ranked_player_sample_is_not_professional_match(self):
+        meta = samples.normalize_metadata({
+            "sampleType": "pro_player_ranked", "focalPlayer": "某选手",
+        })
+        self.assertFalse(meta["isProfessionalMatch"])
+        self.assertEqual(meta["analysisScope"], "选手个人决策")
+
+    def test_invalid_weight_is_rejected(self):
+        for value in (0, 6, float("nan"), "不是数字"):
+            with self.assertRaises(samples.SampleError):
+                samples.normalize_metadata({"sampleType": "other", "trainingWeight": value})
+
+    def test_smart_plan_gets_denser_as_game_progresses(self):
+        plan = video.sampling_plan(900, mode="smart")
+        times = plan["times"]
+        early = [b - a for a, b in zip(times, times[1:]) if a < 230]
+        middle = [b - a for a, b in zip(times, times[1:]) if 250 <= a < 580]
+        late = [b - a for a, b in zip(times, times[1:]) if a >= 620]
+        self.assertTrue(early and middle and late)
+        self.assertLessEqual(max(early), 8)
+        self.assertLessEqual(max(middle), 5)
+        self.assertLessEqual(max(late), 3)
+        self.assertTrue(plan["adaptive"])
+        scan_gaps = [b - a for a, b in zip(plan["scanTimes"], plan["scanTimes"][1:])]
+        self.assertLessEqual(max(scan_gaps), 2,
+                             "智能模式若不至少每2秒低清扫描一次，会漏掉短暂事件")
+
+    def test_batch_ids_never_overwrite_existing_game(self):
+        with tempfile.TemporaryDirectory() as raw:
+            data_dir = Path(raw)
+            store.create_game(data_dir, "KPL_BATCH_001", {"kept": True})
+            allocated = store.next_game_id(data_dir, "KPL_BATCH", 1)
+            self.assertEqual(allocated, "KPL_BATCH_001_2")
+            self.assertTrue(store.load_meta(data_dir, "KPL_BATCH_001")["kept"])
 
 
 if __name__ == "__main__":

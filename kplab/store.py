@@ -175,6 +175,20 @@ def list_games(data_dir: Path) -> list[str]:
     return sorted(p.name for p in root.iterdir() if p.is_dir())
 
 
+def next_game_id(data_dir: Path, prefix: str, index: int) -> str:
+    """为批量导入分配不覆盖旧数据的编号。"""
+    clean = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(prefix or "BATCH")).strip("_.-")
+    clean = (clean or "BATCH")[:68]
+    base = f"{clean}_{max(1, int(index)):03d}"[:80]
+    candidate = base
+    suffix = 2
+    while game_root(data_dir, candidate).exists():
+        tail = f"_{suffix}"
+        candidate = base[:80 - len(tail)] + tail
+        suffix += 1
+    return candidate
+
+
 def delete_game(data_dir: Path, game_id: str) -> bool:
     root = game_root(data_dir, game_id)
     if not root.is_dir():
@@ -222,6 +236,13 @@ def game_summary(data_dir: Path, game_id: str) -> dict[str, Any]:
         "blueTeam": meta.get("blueTeam") or "",
         "redTeam": meta.get("redTeam") or "",
         "sourceKind": meta.get("sourceKind") or "",
+        "sampleType": meta.get("sampleType") or "other",
+        "sampleTypeLabel": meta.get("sampleTypeLabel") or "其他录像",
+        "focalPlayer": meta.get("focalPlayer") or "",
+        "focalTeam": meta.get("focalTeam") or "",
+        "gamePatch": meta.get("gamePatch") or "",
+        "trainingWeight": meta.get("trainingWeight"),
+        "tags": meta.get("tags") or [],
         "blueWin": meta.get("blueWin"),
         "hasObservations": obs_path.is_file(),
         "observationCount": sum(1 for _ in read_jsonl_gz(obs_path)),
