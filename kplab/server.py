@@ -34,6 +34,7 @@ class Console:
         self.lock = threading.Lock()
         self.data_dir = data_dir
         self.job: dict[str, Any] = _idle_job()
+        self.cancel_event = threading.Event()
 
     def set_data_dir(self, path: Path) -> None:
         with self.lock:
@@ -43,6 +44,7 @@ class Console:
         with self.lock:
             if self.job["running"]:
                 return {"started": False, "reason": "已经有一个任务在跑，等它结束。"}
+            self.cancel_event.clear()
             self.job = {"running": True, "title": title, "lines": [], "error": None,
                         "done": 0, "total": 0, "finished": False,
                         "startedAt": time.strftime("%H:%M:%S")}
@@ -66,6 +68,12 @@ class Console:
 
         threading.Thread(target=runner, daemon=True).start()
         return {"started": True}
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
+
+    def cancelled(self) -> bool:
+        return self.cancel_event.is_set()
 
     def progress(self, done: int | None = None, total: int | None = None) -> None:
         with self.lock:
@@ -377,13 +385,18 @@ def _source_batches_work(data_dir: Path, batches: list[dict[str, Any]]) -> Calla
                             headers=resolved.headers, on_progress=progress,
                             start_sec=start_sec, end_sec=end_sec, mode="smart",
                             relative_timestamps=True, file_prefix="stream",
+                            should_cancel=_console().cancelled,
                         )
                     else:
                         records = video.stream_extract_frames(
                             resolved.sourceUrl, store.frames_dir(data_dir, job["gameId"]),
                             info.durationSec, mode, every, start_sec, end_sec,
                             headers=resolved.headers, on_progress=progress,
+                            should_cancel=_console().cancelled,
                         )
+                    if _console().cancelled():
+                        log("任务已安全中断；下次启动将从已保存的帧继续。")
+                        return
                     segment_duration = ((end_sec - start_sec) if job.get("sourceParentGameId")
                                         and end_sec is not None else info.durationSec)
                     store.create_game(data_dir, job["gameId"], {
@@ -413,6 +426,9 @@ def _source_batches_work(data_dir: Path, batches: list[dict[str, Any]]) -> Calla
                         log("读取浏览器登录状态超时，改用公开页面继续；不会影响后续登录受限录像。")
                     log(f"第{attempt}次解析失败，将重新获取媒体地址。")
                 except video.VideoError as err:
+                    if _console().cancelled():
+                        log("任务已安全中断；下次启动将从已保存的帧继续。")
+                        return
                     if (mode == "smart" and "超过2000张基础帧" in str(err)
                             and start_sec == 0 and end_sec is None):
                         try:
@@ -433,6 +449,7 @@ def _source_batches_work(data_dir: Path, batches: list[dict[str, Any]]) -> Calla
                                 store.frames_dir(data_dir, job["gameId"]),
                                 info.durationSec, every_sec=60.0, width=640,
                                 headers=resolved.headers, on_progress=scout_progress,
+                                should_cancel=_console().cancelled,
                             )
                             store.create_game(data_dir, job["gameId"], {
                                 "videoDurationSec": round(info.durationSec, 3),
@@ -453,6 +470,9 @@ def _source_batches_work(data_dir: Path, batches: list[dict[str, Any]]) -> Calla
                             log(f"✅ {job['gameId']}：保存 {len(records)} 张低清侦察帧，等待自动划分比赛区间。")
                             break
                         except video.VideoError as scout_err:
+                            if _console().cancelled():
+                                log("任务已安全中断；下次启动将从已保存的帧继续。")
+                                return
                             last_error_code = sources.classify_media_error(scout_err)
                             last_error_message = sources.safe_error(scout_err)
                             if (last_error_code in {"NETWORK_ERROR", "MEDIA_URL_EXPIRED"}
@@ -1210,6 +1230,7 @@ def serve(data_dir: Path, port: int = 8020) -> None:
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
+        CONSOLE.cancel()
         print("\n已停止。")
     finally:
         httpd.server_close()
