@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,7 +19,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (__version__, annotate, check, evaluate, hud, minimap, ocr, paths,
-               rules, schema, state as state_mod, store, video)
+               rules, samples, schema, state as state_mod, store, video)
 
 WEB_DIR = Path(__file__).parent / "web"
 MAX_BODY = 4 * 1024 * 1024
@@ -114,6 +115,7 @@ def api_status() -> dict[str, Any]:
         },
         "minimapNote": ocr.minimap_note(),
         "minimap": minimap.load_thresholds(data_dir),
+        "sampleTypes": samples.public_types(),
     }
 
 
@@ -124,13 +126,77 @@ def api_create_game(body: dict[str, Any]) -> dict[str, Any]:
                 "比赛编号只能用字母、数字、下划线、点、短横线，"
                 "建议格式：KPL2026S1_AG_vs_EST_G1"}
     data_dir = paths.ensure(_console().data_dir)
+    try:
+        sample_meta = samples.normalize_metadata(body)
+    except samples.SampleError as err:
+        return {"ok": False, "error": str(err)}
     meta = {k: body.get(k) for k in
-            ("title", "tournament", "blueTeam", "redTeam", "sourceKind", "sourceUrl", "note")
+            ("title", "blueTeam", "redTeam", "sourceKind", "sourceUrl", "note")
             if body.get(k) is not None}
+    meta.update(sample_meta)
     if body.get("blueWin") is not None:
         meta["blueWin"] = bool(body["blueWin"])
     store.create_game(data_dir, game_id, meta)
     return {"ok": True, "gameId": game_id, "summary": store.game_summary(data_dir, game_id)}
+
+
+def api_create_batch(body: dict[str, Any]) -> dict[str, Any]:
+    """一次为多段录像建档，返回与文件输入顺序一致的编号。"""
+    files = body.get("files")
+    if not isinstance(files, list) or not files:
+        return {"ok": False, "error": "请至少选择一个录像文件。"}
+    if len(files) > 100:
+        return {"ok": False, "error": "一次最多处理100个录像文件。"}
+    try:
+        common = samples.normalize_metadata(body)
+    except samples.SampleError as err:
+        return {"ok": False, "error": str(err)}
+    data_dir = paths.ensure(_console().data_dir)
+    prefix = str(body.get("batchPrefix") or time.strftime("VIDEO_%Y%m%d_%H%M%S"))
+    prepared: list[tuple[str, int]] = []
+    for index, item in enumerate(files, 1):
+        if not isinstance(item, dict):
+            return {"ok": False, "error": f"第{index}个录像信息不完整。"}
+        name = Path(str(item.get("name") or f"录像{index}")).name[:180]
+        try:
+            size = int(item.get("sizeBytes") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size <= 0:
+            return {"ok": False, "error": f"{name}是空文件或大小无法读取。"}
+        prepared.append((name, size))
+
+    created: list[dict[str, Any]] = []
+    reserved: set[str] = set()
+    for index, (name, size) in enumerate(prepared, 1):
+        game_id = store.next_game_id(data_dir, prefix, index)
+        while game_id in reserved:
+            game_id = store.next_game_id(data_dir, game_id, 1)
+        reserved.add(game_id)
+        meta = {
+            **common,
+            "title": name,
+            "sourceKind": "browser-video",
+            "videoName": name,
+            "videoSizeBytes": size,
+            "batchPrefix": prefix[:80],
+            "batchIndex": index,
+        }
+        store.create_game(data_dir, game_id, meta)
+        created.append({"gameId": game_id, "fileName": name, "index": index})
+    return {"ok": True, "created": created, "count": len(created)}
+
+
+def api_sampling_plan(body: dict[str, Any]) -> dict[str, Any]:
+    try:
+        plan = video.sampling_plan(
+            body.get("durationSec"), body.get("startSec") or 0,
+            body.get("endSec") if body.get("endSec") not in (None, "") else None,
+            str(body.get("mode") or "smart"), body.get("everySec") or 5,
+        )
+    except video.VideoError as err:
+        return {"ok": False, "error": str(err)}
+    return {"ok": True, **plan}
 
 
 def api_delete_game(body: dict[str, Any]) -> dict[str, Any]:
@@ -305,6 +371,70 @@ def api_extract(body: dict[str, Any]) -> dict[str, Any]:
     return _console().start_job(f"抽帧：{game_id}", work)
 
 
+def api_register_browser_video(body: dict[str, Any]) -> dict[str, Any]:
+    """只记录用户选择的录像信息；录像本身不会上传或复制。"""
+    data_dir = paths.ensure(_console().data_dir)
+    game_id = str(body.get("gameId") or "")
+    if not store.valid_game_id(game_id) or not store.load_meta(data_dir, game_id):
+        return {"ok": False, "error": f"没有这场比赛：{game_id}"}
+    try:
+        duration = float(body.get("durationSec") or 0)
+        width = int(body.get("width") or 0)
+        height = int(body.get("height") or 0)
+        size = int(body.get("sizeBytes") or 0)
+        every = float(body.get("everySec") or 5)
+        maximum_gap = float(body.get("maximumGapSec") or every)
+        change_scan = float(body.get("changeScanEverySec") or 0)
+        base_count = int(body.get("baseFrameCount") or 0)
+        scan_count = int(body.get("scanPointCount") or 0)
+        adaptive_count = int(body.get("adaptiveFrameCount") or 0)
+        saved_count = int(body.get("savedFrameCount") or 0)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "录像信息不完整，浏览器无法读取时长或分辨率。"}
+    if (not all(math.isfinite(value) for value in (duration, every, maximum_gap, change_scan))
+            or duration <= 0 or width <= 0 or height <= 0 or size <= 0 or every <= 0
+            or maximum_gap <= 0 or change_scan < 0
+            or min(base_count, scan_count, adaptive_count, saved_count) < 0
+            or max(base_count, saved_count) > video.MAX_BROWSER_FRAMES
+            or scan_count > video.MAX_BROWSER_SCAN_POINTS):
+        return {"ok": False, "error": "录像信息不完整，浏览器无法读取时长或分辨率。"}
+    name = Path(str(body.get("fileName") or "本地录像")).name[:180]
+    sampling_mode = str(body.get("samplingMode") or "fixed")
+    if sampling_mode not in video.SAMPLING_MODES:
+        return {"ok": False, "error": "不支持这种抽帧模式。"}
+    store.create_game(data_dir, game_id, {
+        "videoImportMode": "browser-local-no-copy",
+        "videoName": name,
+        "videoSizeBytes": size,
+        "videoDurationSec": round(duration, 3),
+        "videoWidth": width,
+        "videoHeight": height,
+        "frameEverySec": every if sampling_mode == "fixed" else None,
+        "samplingMode": sampling_mode,
+        "samplingMaxGapSec": maximum_gap,
+        "baseFrameCount": base_count,
+        "changeScanEverySec": change_scan or None,
+        "scanPointCount": scan_count,
+        "adaptiveFrameCount": adaptive_count,
+        "savedFrameCount": saved_count,
+    })
+    return {"ok": True, "message": "只记录了录像信息，没有复制或上传整段录像。"}
+
+
+def api_upload_browser_frame(
+    game_id: str, at_sec: str, body: bytes, content_type: str
+) -> dict[str, Any]:
+    data_dir = paths.ensure(_console().data_dir)
+    if not store.valid_game_id(game_id) or not store.load_meta(data_dir, game_id):
+        return {"ok": False, "error": f"没有这场比赛：{game_id}"}
+    try:
+        return video.save_browser_frame(
+            store.frames_dir(data_dir, game_id), float(at_sec), body, content_type
+        )
+    except (TypeError, ValueError, video.VideoError) as err:
+        return {"ok": False, "error": str(err)}
+
+
 def api_frames(game_id: str) -> dict[str, Any]:
     data_dir = _console().data_dir
     if not store.valid_game_id(game_id):
@@ -406,10 +536,15 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": f"{type(err).__name__}: {err}"}, status=500)
 
     def do_POST(self) -> None:      # noqa: N802
-        path = urlparse(self.path).path.rstrip("/") or "/"
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        if path == "/api/frame/upload":
+            self._receive_browser_frame(parse_qs(parsed.query))
+            return
         routes: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "/api/datadir": api_set_data_dir,
             "/api/game/create": api_create_game,
+            "/api/game/batch-create": api_create_batch,
             "/api/game/delete": api_delete_game,
             "/api/annotate": api_annotate,
             "/api/rules": api_save_rule,
@@ -418,6 +553,8 @@ class Handler(BaseHTTPRequestHandler):
             "/api/extract": api_extract,
             "/api/minimap/detect": api_minimap_detect,
             "/api/minimap/save": api_minimap_save,
+            "/api/video/register": api_register_browser_video,
+            "/api/video/plan": api_sampling_plan,
         }
         handler = routes.get(path)
         if not handler:
@@ -427,6 +564,27 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(handler(self._body()))
         except Exception as err:      # noqa: BLE001
             self._send_json({"error": f"{type(err).__name__}: {err}"}, status=500)
+
+    def _receive_browser_frame(self, query: dict[str, list[str]]) -> None:
+        """接收浏览器本地解码的一张图；绝不接收整段录像。"""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0:
+            self._send_json({"ok": False, "error": "收到的是空图片。"}, status=400)
+            return
+        if length > video.BROWSER_FRAME_MAX_BYTES:
+            self._send_json({"ok": False, "error": "单张帧图超过 8 MB。"}, status=413)
+            return
+        body = self.rfile.read(length)
+        result = api_upload_browser_frame(
+            (query.get("game") or [""])[0],
+            (query.get("atSec") or [""])[0],
+            body,
+            self.headers.get("Content-Type") or "",
+        )
+        self._send_json(result, status=200 if result.get("ok") else 400)
 
     def _send_frame(self, query: dict[str, list[str]]) -> None:
         """把抽出来的帧图发给标注页。

@@ -62,6 +62,21 @@
   .cand:hover { border-color:#3b82f6; }
   .note { border-left:3px solid #3b82f6; padding:2px 0 2px 12px; color:#9aa3b2;
           font-size:13px; margin:12px 0 0; white-space:pre-wrap; }
+  .drop { border:2px dashed #3b82f6; border-radius:10px; padding:22px 16px;
+          text-align:center; cursor:pointer; background:#101824; transition:.15s; }
+  .drop:hover, .drop.drag { background:#14233a; border-color:#7aa7ff; }
+  .drop strong { display:block; font-size:15px; margin-bottom:3px; }
+  .privacy { margin:10px 0; padding:10px 12px; border-radius:7px; color:#a7f3d0;
+             background:#0d241c; border:1px solid #165c43; font-size:13px; }
+  .video-preview { display:none; width:100%; max-height:420px; margin:12px 0;
+                   background:#000; border-radius:8px; }
+  progress { width:100%; height:14px; margin-top:10px; accent-color:#3b82f6; }
+  details { margin-top:12px; }
+  summary { cursor:pointer; color:#8b93a1; }
+  .queue { margin-top:12px; }
+  .queue td:first-child { max-width:360px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .status-running { color:#93c5fd; } .status-done { color:#86efac; }
+  .status-error { color:#fca5a5; }
 </style>
 
 <h1>王者荣耀决策实验室 · 数据控制台</h1>
@@ -103,50 +118,87 @@
 </div>
 
 <div class="card">
-  <h2><span class="step" id="s3">3</span> 建立一场比赛</h2>
+  <h2><span class="step" id="s3">3</span> 设置这一批录像的样本标签</h2>
   <p class="hint">
-    编号建议写成 <code>KPL2026S1_AG_vs_EST_G1</code> 这种一眼看得懂的格式。
-    <b>胜负现在就填</b> —— 它是将来训练胜率模型唯一的标签，事后补要重新翻录像。
+    职业正式比赛、职业选手单排和其他顶尖玩家对局会分层保存，后续可以分别训练、
+    调整权重或只分析某支战队。这里的初始权重只是记录，不会立即训练模型。
   </p>
   <div class="row">
-    <div style="flex:2"><label>比赛编号</label><input type="text" id="gid" placeholder="KPL2026S1_AG_vs_EST_G1"></div>
-    <div><label>赛事</label><input type="text" id="tour" placeholder="KPL 2026 春季赛"></div>
+    <div><label>样本类型</label><select id="sampleType" onchange="sampleTypeChanged()">
+      <option value="professional_match">职业正式比赛</option>
+      <option value="pro_player_ranked">职业选手单排/巅峰赛</option>
+      <option value="top_player_ranked">其他顶尖选手对局</option>
+      <option value="scrim">训练赛/约战</option>
+      <option value="other">其他录像</option>
+    </select></div>
+    <div style="max-width:130px"><label>初始训练权重</label><input type="number" id="trainingWeight" value="1.5" min="0.1" max="5" step="0.1"></div>
+    <div><label>游戏版本</label><input type="text" id="gamePatch" placeholder="例如 S40 / 具体版本号"></div>
+    <div><label>批次名称（可留空）</label><input type="text" id="batchPrefix" placeholder="例如 KPL2026S1_AG"></div>
   </div>
   <div class="row">
-    <div><label>蓝方战队</label><input type="text" id="blue"></div>
-    <div><label>红方战队</label><input type="text" id="red"></div>
-    <div><label>谁赢了</label>
-      <select id="win">
-        <option value="">还不知道</option>
-        <option value="1">蓝方</option>
-        <option value="0">红方</option>
-      </select></div>
-    <div><label>数据来源</label>
-      <select id="srcKind">
-        <option value="broadcast">职业转播</option>
-        <option value="replay">游戏内回放</option>
-        <option value="manual">纯人工记录</option>
-      </select></div>
-    <div style="flex:0"><button onclick="createGame()">建立</button></div>
+    <div><label>重点选手</label><input type="text" id="focalPlayer" placeholder="单人录像建议填写"></div>
+    <div><label>所属/重点战队</label><input type="text" id="focalTeam"></div>
+    <div><label>分段</label><input type="text" id="rankTier" placeholder="例如 巅峰前100"></div>
+    <div><label>赛事/赛季</label><input type="text" id="tour" placeholder="例如 KPL 2026 春季赛"></div>
+    <div style="flex:2"><label>其他标签（逗号分隔）</label><input type="text" id="sampleTags" placeholder="打野,逆风局,版本强势英雄"></div>
   </div>
-  <div class="msg" id="gameMsg"></div>
+  <details>
+    <summary>单独手工建立一场比赛（通常不需要）</summary>
+    <div class="row" style="margin-top:10px">
+      <div style="flex:2"><label>比赛编号</label><input type="text" id="gid" placeholder="KPL2026S1_AG_vs_EST_G1"></div>
+      <div><label>蓝方</label><input type="text" id="blue"></div>
+      <div><label>红方</label><input type="text" id="red"></div>
+      <div><label>胜方</label><select id="win"><option value="">未知</option><option value="1">蓝方</option><option value="0">红方</option></select></div>
+      <div style="flex:0"><button onclick="createGame()">建立</button></div>
+    </div>
+    <div class="msg" id="gameMsg"></div>
+  </details>
 </div>
 
 <div class="card">
-  <h2><span class="step" id="s4">4</span> 从录像抽帧<span class="pill" id="ffPill">需要 ffmpeg</span></h2>
+  <h2><span class="step" id="s4">4</span> 批量选择录像并在本机智能抽帧<span class="pill on">不复制整段录像</span></h2>
   <p class="hint">
-    把录像按固定间隔切成图片，供标注页逐帧核对。
-    间隔默认 30 秒：王者一局通常 15~20 分钟，一分钟一帧会漏掉整场团战。
+    可一次拖入多段录像，系统会自动逐场建档。智能模式按比赛阶段使用前期8秒、
+    中期5秒、后期3秒的最大间隔，并在画面明显变化的区间补帧。
   </p>
+  <div class="privacy">🔒 本地处理：页面只把抽出的 JPEG 图片交给运行在 127.0.0.1 的本地系统。</div>
   <div class="row">
-    <div style="flex:2"><label>比赛编号</label><select id="exGame"></select></div>
-    <div style="flex:3"><label>录像文件的完整路径</label>
-      <input type="text" id="exVideo" placeholder="/Users/你的名字/Downloads/xxx.mp4"></div>
-    <div style="flex:0;min-width:90px"><label>间隔（秒）</label><input type="number" id="exEvery" value="30"></div>
-    <div style="flex:0"><button onclick="extract()">开始抽帧</button></div>
+    <div style="flex:2"><label>抽帧方式</label><select id="samplingMode" onchange="samplingModeChanged()">
+      <option value="smart">智能战术采样（推荐）</option>
+      <option value="dense">全程每3秒</option>
+      <option value="fixed">自定义固定间隔</option>
+    </select></div>
+    <div style="flex:0;min-width:120px"><label>固定间隔（秒）</label><input type="number" id="exEvery" value="5" min="1" disabled></div>
+    <div style="flex:0;min-width:105px"><label>从第几秒</label><input type="number" id="exStart" value="0" min="0"></div>
+    <div style="flex:0;min-width:105px"><label>到第几秒</label><input type="number" id="exEnd" placeholder="自动到结尾" min="0"></div>
   </div>
-  <div class="msg" id="exMsg"></div>
-  <pre class="log" id="jobLog" style="display:none"></pre>
+  <div class="drop" id="videoDrop" tabindex="0">
+    <strong>把一段或多段 MP4 / MOV / M4V 录像拖到这里</strong>
+    或点击多选文件；iCloud、Dropbox、OneDrive同步文件夹里的录像也可以直接选
+    <input type="file" id="videoFile" accept="video/mp4,video/quicktime,video/x-m4v,video/webm" multiple hidden>
+  </div>
+  <table class="queue" id="batchTable" style="display:none"><thead><tr><th>录像</th><th>大小</th><th>系统编号</th><th>状态</th></tr></thead><tbody id="batchRows"></tbody></table>
+  <video id="localVideo" class="video-preview" controls playsinline muted></video>
+  <div id="videoInfo" class="hint" style="margin-top:10px"></div>
+  <div class="row" style="margin-top:10px">
+    <div style="flex:0"><button id="localExtractButton" onclick="extractBatch()" disabled>批量建档并智能抽帧</button></div>
+    <div style="flex:0"><button id="cancelExtractButton" class="ghost" onclick="cancelLocalExtract()" disabled>停止</button></div>
+  </div>
+  <progress id="localProgress" value="0" max="1" style="display:none"></progress>
+  <div class="msg" id="localMsg"></div>
+
+  <details>
+    <summary>兼容模式：已经知道录像在电脑上的完整路径</summary>
+    <p class="hint">这种方式使用 ffmpeg，仍然不会复制整段录像，适合浏览器不能播放的格式。</p>
+    <div class="row">
+      <div style="flex:2"><label>已建立的比赛</label><select id="exGame"></select></div>
+      <div style="flex:3"><label>录像文件的完整路径</label>
+        <input type="text" id="exVideo" placeholder="/Users/你的名字/Downloads/xxx.mp4"></div>
+      <div style="flex:0"><button onclick="extract()">使用 ffmpeg 抽帧</button></div>
+    </div>
+    <div class="msg" id="exMsg"></div>
+    <pre class="log" id="jobLog" style="display:none"></pre>
+  </details>
 </div>
 
 <div class="card">
@@ -156,8 +208,8 @@
     <b>先标注，再考虑自动识别</b> —— 没有人工标注就无法验证识别准不准。
   </p>
   <table>
-    <thead><tr><th>比赛</th><th>对阵</th><th>帧图</th><th>标注</th><th>观测</th><th>胜负</th><th></th></tr></thead>
-    <tbody id="gameRows"><tr><td colspan="7" style="color:#8b93a1">还没有比赛。</td></tr></tbody>
+    <thead><tr><th>比赛</th><th>样本类型</th><th>重点对象</th><th>帧图</th><th>标注</th><th>观测</th><th>胜负</th><th></th></tr></thead>
+    <tbody id="gameRows"><tr><td colspan="8" style="color:#8b93a1">还没有比赛。</td></tr></tbody>
   </table>
 </div>
 
@@ -177,7 +229,10 @@
 
 <script>
 const $ = id => document.getElementById(id);
-let STATUS = null, jobTimer = null;
+let STATUS = null, jobTimer = null, localVideoFiles = [], localVideoUrl = null;
+let localExtractCancelled = false;
+const sampleWeights = {professional_match:1.5, pro_player_ranked:1.2,
+  top_player_ranked:1.0, scrim:1.2, other:0.6};
 
 function msg(id, text, kind='ok') {
   const el = $(id); el.className = 'msg ' + kind; el.textContent = text;
@@ -189,6 +244,238 @@ async function api(path, body) {
   const res = await fetch(path, opt);
   return res.json();
 }
+
+function bytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+  return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+
+function clock(sec) {
+  sec = Math.max(0, Math.round(sec));
+  return Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0');
+}
+
+function safe(text) {
+  return String(text ?? '').replace(/[&<>"']/g, char =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+}
+
+function sampleMetadata() {
+  return {
+    sampleType: $('sampleType').value,
+    trainingWeight: parseFloat($('trainingWeight').value),
+    gamePatch: $('gamePatch').value.trim(),
+    focalPlayer: $('focalPlayer').value.trim(),
+    focalTeam: $('focalTeam').value.trim(),
+    rankTier: $('rankTier').value.trim(),
+    tournament: $('tour').value.trim(),
+    tags: $('sampleTags').value,
+  };
+}
+
+function sampleTypeChanged() {
+  $('trainingWeight').value = sampleWeights[$('sampleType').value] || 1;
+}
+
+function samplingModeChanged() {
+  $('exEvery').disabled = $('samplingMode').value !== 'fixed';
+}
+
+function chooseVideos(files) {
+  const selected = Array.from(files || []).slice(0, 100);
+  if (!selected.length) return;
+  localVideoFiles = selected;
+  $('batchTable').style.display = 'table';
+  $('batchRows').innerHTML = selected.map((file, index) => `
+    <tr id="batch_${index}"><td title="${safe(file.name)}">${safe(file.name)}</td>
+    <td>${bytes(file.size)}</td><td class="batch-id">—</td>
+    <td class="batch-status">等待</td></tr>`).join('');
+  $('localExtractButton').disabled = false;
+  $('videoInfo').textContent = `已选择 ${selected.length} 段录像，共 ${bytes(selected.reduce((n, file) => n + file.size, 0))}`;
+  msg('localMsg', '录像只被页面引用，尚未复制或处理。', 'ok');
+}
+
+function setBatchStatus(index, text, kind='', gameId='') {
+  const row = $('batch_' + index);
+  if (!row) return;
+  if (gameId) row.querySelector('.batch-id').textContent = gameId;
+  const cell = row.querySelector('.batch-status');
+  cell.textContent = text;
+  cell.className = 'batch-status ' + (kind ? 'status-' + kind : '');
+}
+
+function loadVideo(file) {
+  return new Promise((resolve, reject) => {
+    if (localVideoUrl) URL.revokeObjectURL(localVideoUrl);
+    localVideoUrl = URL.createObjectURL(file);
+    const player = $('localVideo');
+    player.onloadedmetadata = () => {
+      if (!Number.isFinite(player.duration) || player.duration <= 0 || !player.videoWidth) {
+        reject(new Error('无法读取录像时长或画面尺寸。'));
+        return;
+      }
+      $('videoInfo').textContent = `${file.name} · ${bytes(file.size)} · ` +
+        `${player.videoWidth}×${player.videoHeight} · ${clock(player.duration)}`;
+      resolve(player);
+    };
+    player.onerror = () => reject(new Error('浏览器不能播放这个格式，请转换为MP4。'));
+    player.src = localVideoUrl;
+    player.style.display = 'block';
+    player.load();
+  });
+}
+
+function waitForSeek(player, atSec) {
+  const samePosition = Math.abs(player.currentTime - atSec) < 0.02;
+  if (samePosition && player.readyState >= 2) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let timer;
+    const finish = error => {
+      clearTimeout(timer);
+      player.removeEventListener('seeked', done);
+      player.removeEventListener('loadeddata', done);
+      player.removeEventListener('error', failed);
+      error ? reject(error) : resolve();
+    };
+    const done = () => finish();
+    const failed = () => finish(new Error('浏览器读取录像失败。'));
+    timer = setTimeout(() => finish(new Error('读取这一帧超过20秒。云端文件可能还在下载。')), 20000);
+    player.addEventListener(samePosition ? 'loadeddata' : 'seeked', done, {once:true});
+    player.addEventListener('error', failed, {once:true});
+    if (!samePosition) player.currentTime = atSec;
+  });
+}
+
+function canvasJpeg(canvas) {
+  return new Promise((resolve, reject) => canvas.toBlob(
+    blob => blob ? resolve(blob) : reject(new Error('浏览器无法生成截图。')),
+    'image/jpeg', 0.82
+  ));
+}
+
+function frameSignature(player) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64; canvas.height = 36;
+  const context = canvas.getContext('2d', {alpha:false, willReadFrequently:true});
+  context.drawImage(player, 0, 0, canvas.width, canvas.height);
+  const rgba = context.getImageData(0, 0, canvas.width, canvas.height).data;
+  const gray = new Uint8Array(canvas.width * canvas.height);
+  for (let i = 0, p = 0; i < rgba.length; i += 4, p += 1) {
+    gray[p] = Math.round((rgba[i] * 3 + rgba[i + 1] * 6 + rgba[i + 2]) / 10);
+  }
+  return gray;
+}
+
+function frameDifference(left, right) {
+  if (!left || !right || left.length !== right.length) return 0;
+  let total = 0;
+  for (let i = 0; i < left.length; i += 1) total += Math.abs(left[i] - right[i]);
+  return total / left.length / 255;
+}
+
+async function uploadVisibleFrame(gameId, at, player, canvas, context) {
+  context.drawImage(player, 0, 0, canvas.width, canvas.height);
+  const blob = await canvasJpeg(canvas);
+  const response = await fetch(`/api/frame/upload?game=${encodeURIComponent(gameId)}&atSec=${encodeURIComponent(at.toFixed(3))}`, {
+    method:'POST', headers:{'Content-Type':'image/jpeg'}, body:blob,
+  });
+  const saved = await response.json();
+  if (!saved.ok) throw new Error(saved.error || '截图保存失败。');
+}
+
+async function processVideo(file, gameId, rowIndex) {
+  const player = await loadVideo(file);
+  player.pause();
+  const start = Math.max(0, parseFloat($('exStart').value) || 0);
+  const rawEnd = parseFloat($('exEnd').value);
+  const end = Number.isFinite(rawEnd) ? Math.min(rawEnd, player.duration) : player.duration;
+  const mode = $('samplingMode').value;
+  const every = parseFloat($('exEvery').value) || 5;
+  const plan = await api('/api/video/plan', {durationSec:player.duration, startSec:start,
+    endSec:end, mode, everySec:every});
+  if (!plan.ok) throw new Error(plan.error);
+
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.min(1280, player.videoWidth);
+  canvas.height = Math.round(player.videoHeight * canvas.width / player.videoWidth);
+  const context = canvas.getContext('2d', {alpha:false});
+  let savedCount = 0, previousSignature = null;
+  const baseKeys = new Set(plan.times.map(at => Number(at).toFixed(3)));
+  $('localProgress').max = plan.scanFrames;
+  $('localProgress').value = 0;
+
+  const registered = await api('/api/video/register', {gameId, fileName:file.name, sizeBytes:file.size,
+    durationSec:player.duration, width:player.videoWidth, height:player.videoHeight,
+    everySec:every, samplingMode:mode, maximumGapSec:plan.maximumGapSec,
+    baseFrameCount:plan.baseFrames, changeScanEverySec:plan.changeScanEverySec,
+    scanPointCount:plan.scanFrames});
+  if (!registered.ok) throw new Error(registered.error || '录像建档失败。');
+
+  for (let index = 0; index < plan.scanTimes.length; index += 1) {
+    if (localExtractCancelled) break;
+    const at = plan.scanTimes[index];
+    setBatchStatus(rowIndex, `${clock(at)} · 扫描 ${index + 1}/${plan.scanFrames}`, 'running', gameId);
+    msg('localMsg', `正在处理第 ${rowIndex + 1}/${localVideoFiles.length} 段：${file.name}\n` +
+      `低清变化扫描 ${index + 1}/${plan.scanFrames}，已保存 ${savedCount} 张。`, 'ok');
+    await waitForSeek(player, Math.min(at, Math.max(0, player.duration - 0.05)));
+    const signature = frameSignature(player);
+    const isBaseFrame = baseKeys.has(Number(at).toFixed(3));
+    const changed = plan.adaptive && previousSignature &&
+      frameDifference(previousSignature, signature) >= 0.10;
+    if (isBaseFrame || (changed && savedCount < 2000)) {
+      await uploadVisibleFrame(gameId, at, player, canvas, context);
+      savedCount += 1;
+    }
+    previousSignature = signature;
+    $('localProgress').value = index + 1;
+  }
+  await api('/api/video/register', {gameId, fileName:file.name, sizeBytes:file.size,
+    durationSec:player.duration, width:player.videoWidth, height:player.videoHeight,
+    everySec:every, samplingMode:mode, maximumGapSec:plan.maximumGapSec,
+    baseFrameCount:plan.baseFrames, changeScanEverySec:plan.changeScanEverySec,
+    scanPointCount:plan.scanFrames,
+    adaptiveFrameCount:Math.max(0, savedCount - plan.baseFrames), savedFrameCount:savedCount});
+  return {savedCount, extraCount:Math.max(0, savedCount - plan.baseFrames)};
+}
+
+async function extractBatch() {
+  if (!localVideoFiles.length) { msg('localMsg', '请先选择录像。', 'err'); return; }
+  const meta = sampleMetadata();
+  if (!Number.isFinite(meta.trainingWeight)) { msg('localMsg', '训练权重必须是数字。', 'err'); return; }
+  const batch = await api('/api/game/batch-create', {...meta,
+    batchPrefix:$('batchPrefix').value.trim(),
+    files:localVideoFiles.map(file => ({name:file.name, sizeBytes:file.size}))});
+  if (!batch.ok) { msg('localMsg', batch.error, 'err'); return; }
+
+  localExtractCancelled = false;
+  $('localExtractButton').disabled = true;
+  $('cancelExtractButton').disabled = false;
+  $('localProgress').style.display = 'block';
+  let completed = 0, failed = 0, totalFrames = 0;
+  for (let index = 0; index < localVideoFiles.length; index += 1) {
+    const gameId = batch.created[index].gameId;
+    setBatchStatus(index, '读取录像…', 'running', gameId);
+    if (localExtractCancelled) { setBatchStatus(index, '未处理', '', gameId); break; }
+    try {
+      const result = await processVideo(localVideoFiles[index], gameId, index);
+      totalFrames += result.savedCount; completed += 1;
+      setBatchStatus(index, `${result.savedCount}张（补${result.extraCount}张）`, 'done', gameId);
+    } catch (error) {
+      failed += 1; setBatchStatus(index, error.message, 'error', gameId);
+    }
+  }
+  $('localExtractButton').disabled = false;
+  $('cancelExtractButton').disabled = true;
+  msg('localMsg', localExtractCancelled
+    ? `已停止：完成 ${completed} 段，保存 ${totalFrames} 张图片。`
+    : `批量完成：成功 ${completed} 段、失败 ${failed} 段，共保存 ${totalFrames} 张图片。`,
+    failed ? 'warn' : localExtractCancelled ? 'warn' : 'ok');
+  await refresh();
+}
+
+function cancelLocalExtract() { localExtractCancelled = true; }
 
 async function refresh() {
   STATUS = await api('/api/status');
@@ -206,8 +493,6 @@ async function refresh() {
   $('envFfmpeg').innerHTML = v.ok
     ? `<span class="pill on">已安装</span> <code>${v.ffmpeg}</code>`
     : `<span class="pill off">未安装</span> 不影响人工标注，只是不能自动抽帧。<code>brew install ffmpeg</code>`;
-  $('ffPill').className = 'pill ' + (v.ok ? 'on' : 'off');
-  $('ffPill').textContent = v.ok ? 'ffmpeg 可用' : '需要 ffmpeg';
 
   const o = STATUS.ocr;
   $('envOcr').innerHTML = o.autoAvailable
@@ -233,7 +518,8 @@ async function refresh() {
   $('gameRows').innerHTML = inv.games.length ? inv.games.map(g => `
     <tr>
       <td><code>${g.gameId}</code></td>
-      <td>${g.blueTeam || '?'} vs ${g.redTeam || '?'}</td>
+      <td><span class="pill ${g.sampleType === 'professional_match' ? 'on' : ''}">${safe(g.sampleTypeLabel)}</span></td>
+      <td>${safe(g.focalPlayer || g.focalTeam || ((g.blueTeam || '?') + ' vs ' + (g.redTeam || '?')))}</td>
       <td>${g.frameImages || '—'}</td>
       <td class="${g.annotationCount ? 'good' : ''}">${g.annotationCount || '—'}</td>
       <td>${g.observationCount || '—'}</td>
@@ -242,7 +528,7 @@ async function refresh() {
         <a href="/annotate?game=${encodeURIComponent(g.gameId)}">标注</a> ·
         <a href="/debug?game=${encodeURIComponent(g.gameId)}">核对</a>
       </td>
-    </tr>`).join('') : '<tr><td colspan="7" style="color:#8b93a1">还没有比赛。</td></tr>';
+    </tr>`).join('') : '<tr><td colspan="8" style="color:#8b93a1">还没有比赛。</td></tr>';
 
   $('ruleRows').innerHTML = Object.entries(r.table).map(([k, e]) => `
     <tr>
@@ -274,9 +560,9 @@ function pick(p) { $('dataDir').value = p; saveDir(); }
 async function createGame() {
   const win = $('win').value;
   const res = await api('/api/game/create', {
-    gameId: $('gid').value.trim(), tournament: $('tour').value,
+    ...sampleMetadata(), gameId: $('gid').value.trim(),
     blueTeam: $('blue').value, redTeam: $('red').value,
-    sourceKind: $('srcKind').value,
+    sourceKind: 'manual',
     blueWin: win === '' ? null : win === '1',
   });
   if (!res.ok) { msg('gameMsg', res.error, 'err'); return; }
@@ -314,4 +600,27 @@ async function pollJob() {
 }
 
 refresh();
+
+const drop = $('videoDrop');
+drop.addEventListener('click', () => $('videoFile').click());
+drop.addEventListener('keydown', event => {
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    $('videoFile').click();
+  }
+});
+$('videoFile').addEventListener('change', event => chooseVideos(event.target.files));
+for (const name of ['dragenter', 'dragover']) {
+  drop.addEventListener(name, event => {
+    event.preventDefault();
+    drop.classList.add('drag');
+  });
+}
+for (const name of ['dragleave', 'drop']) {
+  drop.addEventListener(name, event => {
+    event.preventDefault();
+    drop.classList.remove('drag');
+  });
+}
+drop.addEventListener('drop', event => chooseVideos(event.dataTransfer.files));
 </script>
