@@ -93,6 +93,28 @@
     </div>
 
     <div class="card" style="margin-top:14px">
+      <h2>③ 地标：塔 / 资源坑 / 头像 <span class="pill" id="lmPill">未标定</span></h2>
+      <p class="tip" style="margin-top:0">
+系统靠「图标在不在」来判断推塔和打龙 —— 塔被拆了，小地图上那个图标就没了。
+所以要先告诉它<b>每个图标在画面的哪个位置</b>。
+
+先在下面选一个地标，再到画面上把那个图标<b>框小一点、贴紧图标</b>，
+框太大会把周围的地图背景一起框进去，图标消失也测不出变化。
+      </p>
+      <div class="row">
+        <div style="flex:2"><label>要标的地标</label><select id="lmSel"></select></div>
+        <div style="flex:0"><button class="ghost sm" onclick="probeLm()">试读这一块</button></div>
+        <div style="flex:0"><button class="ghost sm" onclick="delLm()">删掉</button></div>
+      </div>
+      <div class="rlist" id="lmList" style="max-height:190px"></div>
+      <div class="row" style="margin-top:10px">
+        <div style="flex:0"><button onclick="saveLm()">保存地标</button></div>
+        <div style="flex:0"><button class="ghost" onclick="scanEvents()">用它跑一遍事件检测</button></div>
+      </div>
+      <div class="msg" id="lmMsg"></div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
       <h2>② 小地图颜色调试 <span class="pill" id="mmPill">未标定</span></h2>
       <p class="tip" style="margin-top:0">
 标好「小地图」那一项之后，点下面的按钮试一次。
@@ -126,10 +148,97 @@
 <script>
 const $ = id => document.getElementById(id);
 let GAME='', FRAMES=[], CURRENT=null, REGIONS={}, ACTIVE=null, SPECS={}, LAST=null;
+let LANDMARKS={}, LM_ACTIVE=null;
+
+// 要标哪些地标。塔的数量按「每路 2 座 + 3 座高地」算，
+// 具体几座取决于版本 —— 少标几座不影响，标了的那些就能测。
+function landmarkPlan(){
+  const out=[];
+  const lanes=[['top','对抗路'],['mid','中路'],['bot','发育路']];
+  for(const [side,sideName,team] of [['blue','蓝方',100],['red','红方',200]])
+    for(const [lane,laneName] of lanes)
+      for(const n of [1,2])
+        out.push({name:`${side}_${lane}_t${n}`, kind:'tower', teamId:team,
+                  label:`${sideName}${laneName}${n}塔`});
+  for(const [side,sideName,team] of [['blue','蓝方',100],['red','红方',200]])
+    out.push({name:`${side}_hg`, kind:'tower', teamId:team, label:`${sideName}高地塔`});
+  out.push({name:'tyrantPit', kind:'objective', label:'暴君坑（下路河道）'});
+  out.push({name:'overlordPit', kind:'objective', label:'主宰坑（上路河道）'});
+  for(let s=1;s<=10;s++)
+    out.push({name:`portrait${s}`, kind:'portrait', slot:s,
+              label:`${s<=5?'蓝':'红'}${(s-1)%5+1} 头像`});
+  return out;
+}
+const LM_PLAN = landmarkPlan();
+
+function renderLm(){
+  const sel=$('lmSel');
+  const prev=sel.value;
+  sel.innerHTML = LM_PLAN.map(l=>
+    `<option value="${l.name}">${LANDMARKS[l.name]?'✓ ':'○ '}${l.label}</option>`).join('');
+  if(prev) sel.value=prev;
+  LM_ACTIVE = sel.value || LM_PLAN[0].name;
+  const done = Object.keys(LANDMARKS).length;
+  $('lmPill').className='pill '+(done?'on':'off');
+  $('lmPill').textContent = done ? `已标 ${done} 个` : '未标定';
+  $('lmList').innerHTML = Object.entries(LANDMARKS).map(([n,v])=>{
+    const spec=LM_PLAN.find(l=>l.name===n)||{label:n};
+    return `<div class="ritem ${n===LM_ACTIVE?'on':''}" onclick="pickLm('${n}')">
+      <span>${esc(spec.label)}</span>
+      <span style="color:#5b6373">${v.box.map(b=>b.toFixed(3)).join(', ')}</span></div>`;
+  }).join('') || '<p style="color:#5b6373;font-size:12px;padding:6px">还没标任何地标。</p>';
+  drawOverlay();
+}
+function pickLm(n){ $('lmSel').value=n; LM_ACTIVE=n; ACTIVE=null; renderRegions(); renderLm();
+  const spec=LM_PLAN.find(l=>l.name===n);
+  $('hint').innerHTML=`正在标地标：<b>${spec?spec.label:n}</b> —— 在画面上把那个图标框起来，框小一点。`; }
+function delLm(){ delete LANDMARKS[LM_ACTIVE]; renderLm(); }
+
+async function probeLm(){
+  const lm=LANDMARKS[LM_ACTIVE];
+  if(!lm){ msg('lmMsg','这个地标还没框过。','err'); return; }
+  if(!CURRENT){ msg('lmMsg','先选一张帧图。','err'); return; }
+  const res=await api('/api/landmarks/probe',{gameId:GAME,file:CURRENT.file,box:lm.box});
+  if(!res.ok){ msg('lmMsg',res.error,'err'); return; }
+  const g=res.signature;
+  msg('lmMsg', `这一块测出来：平均色 (${g.r}, ${g.g}, ${g.b})　饱和度 ${g.saturation}　亮度 ${g.value}\n`+
+    `图标在的时候和消失之后，这几个数应该有明显差别。差别太小说明框歪了或框太大。`, 'ok');
+}
+async function saveLm(){
+  const items={};
+  for(const [n,v] of Object.entries(LANDMARKS)){
+    const spec=LM_PLAN.find(l=>l.name===n); if(!spec) continue;
+    items[n]={kind:spec.kind, box:v.box, label:spec.label};
+    if(spec.teamId) items[n].teamId=spec.teamId;
+    if(spec.slot) items[n].slot=spec.slot;
+  }
+  const res=await api('/api/landmarks/save',{items, calibrated:true});
+  msg('lmMsg', res.ok?res.message:res.error, res.ok?'ok':'err');
+  if(res.ok) renderLm();
+}
+async function scanEvents(){
+  msg('lmMsg','正在逐帧比对图标…','ok');
+  const res=await api('/api/events/scan',{gameId:GAME});
+  if(!res.ok){ msg('lmMsg',res.error,'err'); return; }
+  const lines=[`${res.frameCount} 帧，检测到 ${res.events.length} 个事件：`];
+  for(const e of res.events.slice(0,12)){
+    const side={100:'蓝方',200:'红方'}[e.teamId]||'归属不明';
+    const c=Math.floor(e.atSec/60), s=Math.floor(e.atSec%60);
+    lines.push(`  ${String(c).padStart(2,'0')}:${String(s).padStart(2,'0')} ${e.type} ${side}`);
+  }
+  for(const l of res.kills.summary) lines.push('· '+l);
+  for(const p of res.quality.problems) lines.push('⚠️ '+p);
+  msg('lmMsg', lines.join('\n'), res.quality.trustworthy?'ok':'warn');
+}
 
 function qs(k){ return new URLSearchParams(location.search).get(k)||''; }
 async function api(p,b){ const o=b?{method:'POST',headers:{'Content-Type':'application/json'},
   body:JSON.stringify(b)}:{}; return (await fetch(p,o)).json(); }
+// 地标名和标签会被插进 innerHTML，必须转义。
+// 少了这个函数会直接抛 ReferenceError，把整段渲染打断 ——
+// 表现是「保存说成功了，列表却是空的」，光看后端完全查不出来。
+const esc = t => String(t==null?'':t).replace(/[&<>"]/g,
+  c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function fmt(s){ s=Math.max(0,Math.round(s));
   return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0'); }
 function msg(id,t,k='ok'){ const e=$(id); e.className='msg '+k; e.textContent=t; if(!t) e.className='msg'; }
@@ -150,9 +259,12 @@ async function boot() {
   $('gameSel').innerHTML = inv.games.map(g =>
     `<option value="${g.gameId}" ${g.gameId===want?'selected':''}>${g.gameId}</option>`).join('');
   GAME = $('gameSel').value;
-  renderRegions();
+  const lm = st.landmarks || {items:{}};
+  for(const [n,v] of Object.entries(lm.items||{})) LANDMARKS[n]={box:v.box};
+  renderRegions(); renderLm();
   if (GAME) loadFrames();
 }
+$('lmSel').addEventListener('change', ()=> pickLm($('lmSel').value));
 $('gameSel').addEventListener('change', ()=>{ GAME=$('gameSel').value; loadFrames(); });
 
 // 区域清单写死在前端，和 hud.REGIONS 对应。只列必需的 + 小地图，
@@ -174,7 +286,7 @@ function renderRegions() {
     </div>`; }).join('');
   drawOverlay();
 }
-function pickRegion(k){ ACTIVE=k; renderRegions();
+function pickRegion(k){ ACTIVE=k; LM_ACTIVE=null; renderRegions();
   $('hint').innerHTML = `正在标定：<b>${LIST.find(l=>l[0]===k)[1]}</b> —— 在图上拖一个框把它圈起来。`; }
 function clearOne(){ if(ACTIVE){ delete REGIONS[ACTIVE]; renderRegions(); } }
 
@@ -198,7 +310,7 @@ function pickFrame(i){
 let dragging=false, sx=0, sy=0;
 const stage=$('stage');
 stage.addEventListener('mousedown', e=>{
-  if(!ACTIVE || !$('img').getAttribute('src')) return;
+  if((!ACTIVE && !LM_ACTIVE) || !$('img').getAttribute('src')) return;
   const r=$('img').getBoundingClientRect();
   dragging=true; sx=(e.clientX-r.left)/r.width; sy=(e.clientY-r.top)/r.height;
   e.preventDefault();
@@ -208,16 +320,23 @@ window.addEventListener('mousemove', e=>{
   const r=$('img').getBoundingClientRect();
   const cx=Math.min(1,Math.max(0,(e.clientX-r.left)/r.width));
   const cy=Math.min(1,Math.max(0,(e.clientY-r.top)/r.height));
-  REGIONS[ACTIVE]=[Math.min(sx,cx),Math.min(sy,cy),Math.abs(cx-sx),Math.abs(cy-sy)];
+  const b=[Math.min(sx,cx),Math.min(sy,cy),Math.abs(cx-sx),Math.abs(cy-sy)];
+  if(ACTIVE) REGIONS[ACTIVE]=b; else if(LM_ACTIVE) LANDMARKS[LM_ACTIVE]={box:b};
   drawOverlay();
 });
 window.addEventListener('mouseup', ()=>{
   if(!dragging) return;
   dragging=false;
-  const b=REGIONS[ACTIVE];
   // 太小的框多半是误点，不要留下一个 0 宽的区域
-  if(!b || b[2]<0.004 || b[3]<0.004){ delete REGIONS[ACTIVE]; }
-  renderRegions();
+  if(ACTIVE){
+    const b=REGIONS[ACTIVE];
+    if(!b || b[2]<0.004 || b[3]<0.004) delete REGIONS[ACTIVE];
+    renderRegions();
+  } else if(LM_ACTIVE){
+    const b=(LANDMARKS[LM_ACTIVE]||{}).box;
+    if(!b || b[2]<0.002 || b[3]<0.002) delete LANDMARKS[LM_ACTIVE];
+    renderLm();
+  }
 });
 
 function drawOverlay(){
@@ -227,6 +346,14 @@ function drawOverlay(){
     if(!spec) continue;
     parts.push(`<div class="box ${k==='minimap'?'mini':''}" style="left:${b[0]*100}%;top:${b[1]*100}%;
       width:${b[2]*100}%;height:${b[3]*100}%"><b>${spec[1]}</b></div>`);
+  }
+  for(const [n,v] of Object.entries(LANDMARKS)){
+    const spec=LM_PLAN.find(l=>l.name===n);
+    const col = spec && spec.kind==='portrait' ? '#4ade80'
+              : spec && spec.kind==='objective' ? '#a78bfa' : '#22d3ee';
+    parts.push(`<div class="box" style="left:${v.box[0]*100}%;top:${v.box[1]*100}%;
+      width:${v.box[2]*100}%;height:${v.box[3]*100}%;border-color:${col};
+      background:${col}22"></div>`);
   }
   if(LAST && LAST.usable && REGIONS.minimap){
     const m=REGIONS.minimap;

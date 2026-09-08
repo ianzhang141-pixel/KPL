@@ -15,6 +15,7 @@
     python3 -m kplab minimap <帧图>              小地图找人（认位置，不认英雄）
     python3 -m kplab curve  <比赛编号>           胜率曲线与拐点（目前是假设基线）
     python3 -m kplab train                      训练 V(s)（数据不够会拒绝，那是设计）
+    python3 -m kplab events <比赛编号>           从图标变化推事件（推塔/打龙/击杀）
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import (__version__, annotate, check, economy_s44, evaluate, hud, knowledge_s44,
+from . import (__version__, annotate, check, economy_s44, evaluate, events_cv, hud, knowledge_s44,
                minimap, model, ocr, paths, rules, schema, sources, state as state_mod, store,
                video)
 
@@ -440,6 +441,68 @@ def cmd_train(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_events(args: argparse.Namespace) -> int:
+    data_dir = paths.find_data_dir(args.data)
+    if not store.load_meta(data_dir, args.game_id):
+        print(f"❌ 没有这场比赛：{args.game_id}")
+        return 2
+    frames_dir = store.frames_dir(data_dir, args.game_id)
+    frames = []
+    if frames_dir.is_dir():
+        for path in sorted(frames_dir.iterdir()):
+            if path.suffix.lower() not in (".jpg", ".jpeg", ".png"):
+                continue
+            stem = path.stem
+            at = 0.0
+            if "_" in stem and stem.rsplit("_", 1)[-1].endswith("s"):
+                try:
+                    at = float(stem.rsplit("_", 1)[-1][:-1])
+                except ValueError:
+                    at = 0.0
+            frames.append({"atSec": at, "path": str(path)})
+    if not frames:
+        print("❌ 这场没有抽出来的帧图。先抽帧：python3 -m kplab frames <编号> --video x.mp4")
+        return 2
+    frames.sort(key=lambda f: f["atSec"])
+
+    print(f"共 {len(frames)} 帧，开始检测图标变化…")
+    result = events_cv.scan(frames, data_dir, rules.load(data_dir))
+    if not result["ok"]:
+        print(f"❌ {result['error']}")
+        return 2
+
+    events = sorted(result["events"], key=lambda e: e["atSec"])
+    print()
+    print(f"── 检测到 {len(events)} 个事件 ──")
+    for event in events:
+        side = {rules.BLUE: "蓝方", rules.RED: "红方"}.get(event.get("teamId"), "归属不明")
+        clock = f"{int(event['atSec']) // 60:02d}:{int(event['atSec']) % 60:02d}"
+        print(f"  {clock}  {event['type']:<24}{side:<10}"
+              f"置信 {event.get('confidence', 0)}")
+        if event.get("attribution"):
+            print(f"          {event['attribution']}")
+
+    print()
+    for line in result["kills"]["summary"]:
+        print(f"  · {line}")
+    for problem in result["quality"]["problems"]:
+        print(f"  ⚠️  {problem}")
+
+    writable = events_cv.to_observation_events(result)
+    print()
+    print(f"其中 {len(writable)} 个够格写进观测（归属明确且置信度达标）。")
+    if args.write:
+        for event in writable:
+            store.append_jsonl_gz(
+                store.observations_path(data_dir, args.game_id),
+                {"atSec": event["atSec"], "fields": {}, "players": {},
+                 "events": [event], "source": "events_cv"})
+        print(f"✅ 已写入 {len(writable)} 条。")
+    else:
+        print("   加 --write 才会真的写进去。")
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     from . import server
     server.serve(paths.find_data_dir(args.data), port=args.port)
@@ -514,6 +577,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("train", help="训练 V(s)。数据不够会拒绝 —— 那是设计不是故障")
     p.set_defaults(func=cmd_train)
+
+    p = sub.add_parser("events", help="从小地图/头像的图标变化推事件（需要先标定地标）")
+    p.add_argument("game_id")
+    p.add_argument("--write", action="store_true", help="把够格的事件写进观测")
+    p.set_defaults(func=cmd_events)
 
     p = sub.add_parser("serve", help="打开网页控制台（推荐）")
     p.add_argument("--port", type=int, default=8020,
