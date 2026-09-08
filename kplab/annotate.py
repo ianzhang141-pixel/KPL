@@ -44,6 +44,11 @@ NUMERIC_FIELDS: dict[str, dict[str, Any]] = {
 }
 
 
+# 在示意图上目测点出来的位置能有多准。压在可信线（0.75）以下是有意的：
+# 那是「大概在中路河道」，不是「在 (0.42, 0.61)」。
+APPROX_POSITION_CONFIDENCE = 0.55
+
+
 class AnnotateError(ValueError):
     pass
 
@@ -128,10 +133,25 @@ def build_observation(
             if value is not None:
                 entry[name] = schema.field(value, schema.SOURCE_MANUAL)
 
+        # 位置有两种来源，精度差一个量级，**绝不能给同一个置信度**：
+        #
+        #   exact  — 在录像自己的小地图上点的（按标定的小地图区域换算）。
+        #            这是精确的，可以当事实用。
+        #   approx — 在示意图上点的。示意图和真实小地图不是等比的，
+        #            没法把录像小地图上的一点对应到示意图上的同一点，
+        #            所以这只是「大概在这一带」，人眼目测的结果。
+        #
+        # approx 的置信度压到可信线以下，它能用来看「谁在哪一带」，
+        # 但不会进入模型特征 —— 否则等于拿人的目测误差当训练信号。
+        precision = str(raw.get("posPrecision") or "approx")
+        pos_confidence = (schema.DEFAULT_CONFIDENCE[schema.SOURCE_MANUAL]
+                          if precision == "exact" else APPROX_POSITION_CONFIDENCE)
         for axis in ("x", "y"):
             value = _clean_coord(raw.get(axis), f"{slot} 号位小地图 {axis}")
             if value is not None:
-                entry[axis] = schema.field(value, schema.SOURCE_MANUAL)
+                entry[axis] = schema.field(value, schema.SOURCE_MANUAL, pos_confidence)
+        if "x" in entry or "y" in entry:
+            entry["posPrecision"] = precision
 
         if raw.get("alive") is not None:
             entry["alive"] = schema.field(bool(raw["alive"]), schema.SOURCE_MANUAL)

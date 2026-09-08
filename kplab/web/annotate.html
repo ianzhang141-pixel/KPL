@@ -56,6 +56,8 @@
           background:#12161d; border:1px solid #2f3644; border-radius:8px;
           cursor:crosshair; overflow:hidden; margin:0 auto; }
   .mini svg { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+  .mini img { position:absolute; inset:0; width:100%; height:100%; object-fit:fill;
+              pointer-events:none; }
   .dot { position:absolute; width:17px; height:17px; border-radius:50%;
          transform:translate(-50%,-50%); border:2px solid #0f1216; font-size:9px;
          text-align:center; line-height:14px; color:#fff; font-weight:700;
@@ -127,14 +129,16 @@ LOL 那个项目就是把先锋和幼虫算进了大龙，训出来的模型是�
       <h2>十名选手</h2>
       <p class="tip" style="margin-top:0">
 <b>「位置」这一栏不用打字。</b> 先点左边的行选中一个人，
-再到下面那张小地图上点一下他所在的位置就行 —— 点完会自动跳到下一个人。
-
+再到下面的地图上点一下他所在的位置 —— 点完会自动跳到下一个人。
 看不清谁在哪就<b>跳过</b>，位置不是必填的。
-（也可以直接在上方的比赛画面里点小地图上的英雄，效果一样。）
       </p>
       <div class="miniwrap">
-        <div class="mini" id="mini"><svg id="miniSvg" viewBox="0 0 100 100"></svg></div>
+        <div class="mini" id="mini">
+          <img id="miniReal" alt="" style="display:none">
+          <svg id="miniSvg" viewBox="0 0 100 100"></svg>
+        </div>
         <div class="region" id="regionText">点行选人，再点地图定位</div>
+        <p class="tip" id="precNote" style="margin-top:8px"></p>
       </div>
       <table>
         <thead><tr><th style="width:30px"></th><th>英雄</th><th>分路</th>
@@ -167,6 +171,9 @@ const EVENTS = [
 ];
 let FRAMES = [], CURRENT = null, ACTIVE_SLOT = 1, GAME = '';
 let MINIMAP_BOX = null;   // 标定过的小地图区域，用来把画面坐标换算成地图坐标
+// 位置的精度：'exact' = 在录像真实小地图上点的；'approx' = 在示意图上目测的。
+// 两者坐标系不同、精度差一个量级，后端据此给完全不同的置信度。
+let POS_PRECISION = 'approx';
 
 // 王者峡谷示意图。**这是示意，不是等比复刻** ——
 // 只画确定无疑的结构：双方基地在对角、三条路、中间一条河道。
@@ -236,7 +243,9 @@ function setPos(slot, x, y) {
   renderDots();
   $('regionText').innerHTML =
     `${slot<=5?'蓝':'红'}${(slot-1)%5+1} → <b>${regionName(x,y)}</b>` +
-    `<span style="color:#5b6373">　(${x.toFixed(2)}, ${y.toFixed(2)})</span>`;
+    `<span style="color:#5b6373">　(${x.toFixed(2)}, ${y.toFixed(2)})</span>` +
+    (POS_PRECISION==='exact' ? '<span style="color:#4ade80">　精确</span>'
+                             : '<span style="color:#fbbf24">　大概位置</span>');
 }
 
 function renderDots() {
@@ -338,6 +347,7 @@ $('frameImg').addEventListener('click', ev => {
     return;
   }
   $('saveMsg').className = 'msg';  $('saveMsg').textContent = '';
+  POS_PRECISION = 'exact';   // 按标定区域换算过，和点放大图等价
   setPos(ACTIVE_SLOT, (fx-bx)/bw, (fy-by)/bh);
   if (ACTIVE_SLOT < 10) { ACTIVE_SLOT++; markActive(); renderDots(); }
 });
@@ -382,8 +392,28 @@ async function loadFrames() {
     `<button class="${f.annotated ? 'done' : ''}" id="fb${i}" onclick="pickFrame(${i})">${fmt(f.atSec)}</button>`
   ).join('');
   if (FRAMES.length) pickFrame(0);
-  else { $('frameImg').style.display = 'none'; $('noFrame').style.display = 'block'; }
+  else { $('frameImg').style.display = 'none'; $('noFrame').style.display = 'block';
+         useRealMinimap(); }
 }
+function useRealMinimap(){
+  // 有帧图 + 标定过小地图 → 用录像自己的小地图，坐标才是精确的。
+  //
+  // 示意图和真实小地图**不是等比的**，所以没法把「录像小地图上的某一点」
+  // 对应到示意图上的同一点 —— 在示意图上只能得到「大概在哪一带」。
+  // 两者的置信度因此完全不同（0.98 vs 0.55），后者进不了模型特征。
+  const ok = !!(CURRENT && MINIMAP_BOX);
+  POS_PRECISION = ok ? 'exact' : 'approx';
+  $('miniReal').style.display = ok ? 'block' : 'none';
+  $('miniSvg').style.opacity  = ok ? '0' : '1';
+  if(ok) $('miniReal').src =
+    `/minimap?game=${encodeURIComponent(GAME)}&file=${encodeURIComponent(CURRENT.file)}`;
+  $('precNote').innerHTML = ok
+    ? '正在用<b>录像里的真实小地图</b>（已放大）。在这上面点是<b>精确</b>的。'
+    : '<b>现在点的是示意图，只能得到大概位置。</b>示意图和真实小地图不是等比的，'
+      + '没法把录像上的一点对应到示意图的同一点。<br>'
+      + '要精确定位：先抽帧，再到<a href="/calibrate">标定页</a>把小地图框出来。';
+}
+
 function pickFrame(i) {
   CURRENT = FRAMES[i];
   if (!CURRENT) return;
@@ -393,6 +423,7 @@ function pickFrame(i) {
   $('clock').value = fmt(CURRENT.atSec);
   FRAMES.forEach((_, j) => $('fb' + j).classList.toggle('on', i === j));
   ACTIVE_SLOT = 1; markActive();
+  useRealMinimap();
 }
 
 function clearForm() {
@@ -423,6 +454,7 @@ async function save() {
     const map = {level:'level', k:'kills', d:'deaths', a:'assists', x:'x', y:'y'};
     for (const [id, name] of Object.entries(map))
       if ($(id + s).value !== '') one[name] = $(id + s).value;
+    if (one.x !== undefined || one.y !== undefined) one.posPrecision = POS_PRECISION;
     if ($('hero' + s).value.trim()) one.heroName = $('hero' + s).value.trim();
     if ($('role' + s).value) one.role = $('role' + s).value;
     if (Object.keys(one).length) payload.players[String(s)] = one;
@@ -457,5 +489,6 @@ loadGames();
   const prof = (st.profiles || {})['kpl_broadcast'];
   const box = (prof || {}).regions && prof.regions.minimap;
   if (box && box.length === 4) MINIMAP_BOX = box;
+  useRealMinimap();
 })();
 </script>

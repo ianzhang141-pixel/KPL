@@ -550,6 +550,35 @@ def _quality(resolved, kills, contradictions, errors) -> dict[str, Any]:
     }
 
 
+def refresh_quality(scan_result: dict[str, Any]) -> dict[str, Any]:
+    """补完归属之后重算一遍质量报告。
+
+    `scan()` 里那份质量是**粗扫当时**的结论，其中「N 个资源判断不出归属」
+    在播报补完之后就过时了。留着不改会让报告自相矛盾：
+    上面明明写着「蓝方拿到暴君」，下面还挂着「判断不出归属」。
+
+    报告和数据对不上，比没有报告更糟 —— 看的人会开始怀疑哪一边是真的。
+    """
+    events = scan_result.get("events", [])
+    kills = scan_result.get("kills") or {"confirmed": [], "portraitOnly": []}
+    quality = dict(scan_result.get("quality") or {})
+    problems = [
+        p for p in quality.get("problems", [])
+        if "判断不出归属" not in p
+    ]
+    unattributed = sum(1 for e in events
+                       if e.get("type", "").endswith("_KILL")
+                       and e.get("teamId") not in (BLUE, RED))
+    if unattributed:
+        problems.append(
+            f"{unattributed} 次中立资源击杀判断不出归属。"
+            "图标消失说不出是谁打的，播报也没找到 —— 这类只能人工补。"
+        )
+    quality["problems"] = problems
+    scan_result["quality"] = quality
+    return scan_result
+
+
 def to_observation_events(scan_result: dict[str, Any],
                           min_confidence: float = 0.5) -> list[dict[str, Any]]:
     """把扫描结果转成可以写进观测的事件。

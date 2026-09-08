@@ -730,15 +730,20 @@ def crop_region(
     crop = f"crop=iw*{w}:ih*{h}:iw*{x}:ih*{y}"
     if scale_width > 0:
         crop += f",scale={scale_width}:-2"
-    # OCR 传入的通常已经是单张 JPG/PNG。对单帧图片在输入前加
-    # ``-ss 0`` 时，某些 ffmpeg 版本会返回 0 却不产生输出文件。
-    # 只在真正需要跳转时才加 -ss，这样图片 OCR 和视频截帧都可用。
-    seek = ["-ss", f"{at_sec:.3f}"] if at_sec > 0 else []
-    result = _run([
-        exe, "-nostdin", "-loglevel", "error", *seek, "-i", str(video),
-        "-frames:v", "1", "-vf", crop, "-q:v", "2",
-        "-y", str(out_file),
-    ], timeout=120)
+    # at_sec <= 0 时**不能**加 -ss。
+    # 对一张静态图片（抽出来的帧图就是），`-ss 0` 会让 ffmpeg 什么都不输出，
+    # 而且退出码是 0、stderr 是空的 —— 完全静默地失败。
+    # 这个坑影响的不只是小地图放大：ocr.read_regions() 也是拿帧图 + 0.0 调这里的，
+    # 也就是说对帧图跑 OCR 一直是拿不到裁剪结果的。
+    command = [exe, "-nostdin", "-loglevel", "error"]
+    if at_sec > 0:
+        command += ["-ss", f"{at_sec:.3f}"]
+    command += ["-i", str(video), "-frames:v", "1", "-vf", crop]
+    if out_file.suffix.lower() in (".jpg", ".jpeg"):
+        command += ["-q:v", "2"]        # 只对 JPEG 有意义
+    command += ["-y", str(out_file)]
+    result = _run(command, timeout=120)
     if result.returncode != 0 or not out_file.is_file():
-        raise VideoError(f"截图失败：{result.stderr.strip()[:300]}")
+        detail = result.stderr.strip()[:300] or "ffmpeg 没报错但也没产出文件"
+        raise VideoError(f"截图失败（{at_sec:.2f}s）：{detail}")
     return out_file
