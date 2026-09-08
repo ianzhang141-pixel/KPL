@@ -1252,6 +1252,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(evaluate.run(_console().data_dir, _tail(path)))
             elif path == "/frame":
                 self._send_frame(query)
+            elif path == "/minimap":
+                self._send_minimap_crop(query)
             else:
                 self._send_json({"error": "not found"}, status=404)
         except FileNotFoundError as err:
@@ -1343,6 +1345,46 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "max-age=3600")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_minimap_crop(self, query: dict[str, list[str]]) -> None:
+        """把某一帧里的小地图区域裁出来放大，供标注页精确点位。
+
+        **这是位置标注唯一精确的来源。**
+        点手画的示意图只能得到一个大概位置 —— 那张图和真实小地图不是等比的，
+        没法把「录像小地图上的某一点」对应到示意图上的同一点。
+        但在录像自己的小地图上点，坐标是精确的。
+        """
+        game_id = (query.get("game") or [""])[0]
+        name = (query.get("file") or [""])[0]
+        try:
+            target = _frame_file(_console().data_dir, game_id, name)
+        except ValueError as err:
+            self._send_json({"error": str(err)}, status=404)
+            return
+
+        profile = hud.get_profile(_console().data_dir,
+                                  (query.get("profile") or ["kpl_broadcast"])[0])
+        box = (profile or {}).get("regions", {}).get("minimap")
+        if not hud.valid_box(box):
+            self._send_json({"error": "小地图区域还没标定"}, status=400)
+            return
+
+        out = target.parent / f".mini_{target.stem}.png"
+        try:
+            video.crop_region(target, out, 0.0, tuple(box), scale_width=520)
+            body = out.read_bytes()
+        except Exception as err:      # noqa: BLE001
+            self._send_json({"error": f"{type(err).__name__}: {err}"}, status=500)
+            return
+        finally:
+            out.unlink(missing_ok=True)
+
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "max-age=600")
         self.end_headers()
         self.wfile.write(body)
 

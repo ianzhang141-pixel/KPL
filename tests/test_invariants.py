@@ -437,3 +437,46 @@ class SampleLibraryAndSampling(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class StillImageCropping(unittest.TestCase):
+    """裁静态图片时不能加 -ss。
+
+    这条来自一个静默失败的真 bug：`ffmpeg -ss 0 -i 静态图` 什么都不输出，
+    但**退出码是 0、stderr 是空的**。调用方只看到「没有文件」，
+    完全不知道为什么。
+
+    影响面比发现它的地方大：`ocr.read_regions()` 也是拿帧图 + 0.0 调
+    `crop_region` 的，也就是说对帧图跑 OCR 一直拿不到裁剪结果。
+    """
+
+    @unittest.skipUnless(__import__("shutil").which("ffmpeg"), "需要 ffmpeg")
+    def test_crop_at_zero_seconds_produces_a_file(self):
+        import subprocess
+        import tempfile
+        from kplab import video
+
+        work = Path(tempfile.mkdtemp())
+        source = work / "still.png"
+        subprocess.run(
+            ["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi",
+             "-i", "color=c=blue:s=320x180", "-frames:v", "1", str(source)],
+            check=True)
+
+        for suffix in (".png", ".jpg"):
+            out = work / f"crop{suffix}"
+            video.crop_region(source, out, 0.0, (0.1, 0.1, 0.5, 0.5), scale_width=200)
+            self.assertTrue(out.is_file(), f"t=0 裁 {suffix} 没有产出文件")
+            self.assertGreater(out.stat().st_size, 0)
+
+    def test_failure_message_is_not_empty(self):
+        """ffmpeg 静默失败时，错误信息不能也是空的。"""
+        import tempfile
+        from kplab import video
+
+        work = Path(tempfile.mkdtemp())
+        with self.assertRaises(video.VideoError) as caught:
+            video.crop_region(work / "nope.png", work / "out.png", 0.0,
+                              (0.1, 0.1, 0.5, 0.5))
+        self.assertTrue(str(caught.exception).strip(),
+                        "抛了异常但没有任何说明，排查时等于没有信息")
