@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import (__version__, annotate, check, economy_s44, evaluate, events_cv, hud, knowledge_s44,
+from . import (__version__, announce, annotate, check, economy_s44, evaluate, events_cv, hud, knowledge_s44,
                minimap, model, ocr, paths, rules, samples, schema, season_s44, sources,
                state as state_mod, store, video)
 
@@ -918,6 +918,20 @@ def api_events_scan(body: dict[str, Any]) -> dict[str, Any]:
     result = events_cv.scan(frames, data_dir, rules.load(data_dir),
                             body.get("scoreChanges") or [])
     result["frameCount"] = len(frames)
+
+    if result.get("ok") and body.get("refine"):
+        meta = store.load_meta(data_dir, game_id) or {}
+        source = Path(str(meta.get("videoPath") or "")).expanduser()
+        profile = hud.get_profile(data_dir, str(body.get("profile") or "kpl_broadcast"))
+        banner = (profile or {}).get("regions", {}).get(announce.BANNER_REGION)
+        times = [f["atSec"] for f in frames]
+        refined = announce.refine(source, result, times,
+                                  tuple(banner) if banner else None,
+                                  step_sec=float(body.get("step") or 1.5))
+        result["refine"] = refined
+        if refined.get("ok"):
+            result["events"] = refined["events"]
+            events_cv.refresh_quality(result)
     return result
 
 

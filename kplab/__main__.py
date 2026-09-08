@@ -15,7 +15,7 @@
     python3 -m kplab minimap <帧图>              小地图找人（认位置，不认英雄）
     python3 -m kplab curve  <比赛编号>           胜率曲线与拐点（目前是假设基线）
     python3 -m kplab train                      训练 V(s)（数据不够会拒绝，那是设计）
-    python3 -m kplab events <比赛编号>           从图标变化推事件（推塔/打龙/击杀）
+    python3 -m kplab events <比赛编号> --refine   从图标变化推事件，并用播报补归属
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import (__version__, annotate, check, economy_s44, evaluate, events_cv, hud, knowledge_s44,
+from . import (__version__, announce, annotate, check, economy_s44, evaluate, events_cv, hud, knowledge_s44,
                minimap, model, ocr, paths, rules, schema, sources, state as state_mod, store,
                video)
 
@@ -471,6 +471,37 @@ def cmd_events(args: argparse.Namespace) -> int:
         print(f"❌ {result['error']}")
         return 2
 
+    # 用播报补归属：图标消失说不出是谁拿的，播报能说。
+    # 只在「图标还在的那一帧」到「图标没了的那一帧」之间精抽，代价很小。
+    if args.refine:
+        meta = store.load_meta(data_dir, args.game_id) or {}
+        source = Path(args.video or meta.get("videoPath") or "").expanduser()
+        profile = hud.get_profile(data_dir, args.profile)
+        banner = (profile or {}).get("regions", {}).get(announce.BANNER_REGION)
+        times = [f["atSec"] for f in frames]
+
+        groups = announce.group_by_bracket(
+            announce.bracket_events(
+                [e for e in result["events"] if e.get("teamId") not in (rules.BLUE, rules.RED)],
+                times))
+        if groups:
+            print()
+            print(f"  {announce.plan_cost(groups)['note']}")
+        refined = announce.refine(source, result, times,
+                                  tuple(banner) if banner else None,
+                                  step_sec=args.step)
+        if not refined["ok"]:
+            print()
+            print(f"⚠️  补归属失败：{refined['error']}")
+        else:
+            result["events"] = refined["events"]
+            events_cv.refresh_quality(result)
+            print()
+            print(f"── 播报补归属：{refined['refined']} 个补上，"
+                  f"{refined.get('stillUnknown', 0)} 个仍不知道 ──")
+            for line in refined["summary"]:
+                print(f"  · {line}")
+
     events = sorted(result["events"], key=lambda e: e["atSec"])
     print()
     print(f"── 检测到 {len(events)} 个事件 ──")
@@ -581,6 +612,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("events", help="从小地图/头像的图标变化推事件（需要先标定地标）")
     p.add_argument("game_id")
     p.add_argument("--write", action="store_true", help="把够格的事件写进观测")
+    p.add_argument("--refine", action="store_true",
+                   help="回到区间里精抽帧找播报，补上「是谁拿的」")
+    p.add_argument("--video", help="录像路径（不写就用建立比赛时记的那个）")
+    p.add_argument("--profile", default="kpl_broadcast", help="用哪个 HUD 标定档案")
+    p.add_argument("--step", type=float, default=1.5, help="精抽的间隔秒数，默认 1.5")
     p.set_defaults(func=cmd_events)
 
     p = sub.add_parser("serve", help="打开网页控制台（推荐）")
