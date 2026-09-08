@@ -251,6 +251,49 @@ def api_extract(body: dict[str, Any]) -> dict[str, Any]:
     return _console().start_job(f"抽帧：{game_id}", work)
 
 
+def api_register_browser_video(body: dict[str, Any]) -> dict[str, Any]:
+    """只记录用户选择的录像信息；录像本身不会上传或复制。"""
+    data_dir = paths.ensure(_console().data_dir)
+    game_id = str(body.get("gameId") or "")
+    if not store.valid_game_id(game_id) or not store.load_meta(data_dir, game_id):
+        return {"ok": False, "error": f"没有这场比赛：{game_id}"}
+    try:
+        duration = float(body.get("durationSec") or 0)
+        width = int(body.get("width") or 0)
+        height = int(body.get("height") or 0)
+        size = int(body.get("sizeBytes") or 0)
+        every = float(body.get("everySec") or 30)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "录像信息不完整，浏览器无法读取时长或分辨率。"}
+    if duration <= 0 or width <= 0 or height <= 0 or size <= 0 or every <= 0:
+        return {"ok": False, "error": "录像信息不完整，浏览器无法读取时长或分辨率。"}
+    name = Path(str(body.get("fileName") or "本地录像")).name[:180]
+    store.create_game(data_dir, game_id, {
+        "videoImportMode": "browser-local-no-copy",
+        "videoName": name,
+        "videoSizeBytes": size,
+        "videoDurationSec": round(duration, 3),
+        "videoWidth": width,
+        "videoHeight": height,
+        "frameEverySec": every,
+    })
+    return {"ok": True, "message": "只记录了录像信息，没有复制或上传整段录像。"}
+
+
+def api_upload_browser_frame(
+    game_id: str, at_sec: str, body: bytes, content_type: str
+) -> dict[str, Any]:
+    data_dir = paths.ensure(_console().data_dir)
+    if not store.valid_game_id(game_id) or not store.load_meta(data_dir, game_id):
+        return {"ok": False, "error": f"没有这场比赛：{game_id}"}
+    try:
+        return video.save_browser_frame(
+            store.frames_dir(data_dir, game_id), float(at_sec), body, content_type
+        )
+    except (TypeError, ValueError, video.VideoError) as err:
+        return {"ok": False, "error": str(err)}
+
+
 def api_frames(game_id: str) -> dict[str, Any]:
     data_dir = _console().data_dir
     if not store.valid_game_id(game_id):
@@ -350,7 +393,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": f"{type(err).__name__}: {err}"}, status=500)
 
     def do_POST(self) -> None:      # noqa: N802
-        path = urlparse(self.path).path.rstrip("/") or "/"
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        if path == "/api/frame/upload":
+            self._receive_browser_frame(parse_qs(parsed.query))
+            return
         routes: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "/api/datadir": api_set_data_dir,
             "/api/game/create": api_create_game,
@@ -360,6 +407,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/profile": api_save_profile,
             "/api/state/build": api_build_state,
             "/api/extract": api_extract,
+            "/api/video/register": api_register_browser_video,
         }
         handler = routes.get(path)
         if not handler:
@@ -369,6 +417,27 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(handler(self._body()))
         except Exception as err:      # noqa: BLE001
             self._send_json({"error": f"{type(err).__name__}: {err}"}, status=500)
+
+    def _receive_browser_frame(self, query: dict[str, list[str]]) -> None:
+        """接收浏览器本地解码的一张图；绝不接收整段录像。"""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0:
+            self._send_json({"ok": False, "error": "收到的是空图片。"}, status=400)
+            return
+        if length > video.BROWSER_FRAME_MAX_BYTES:
+            self._send_json({"ok": False, "error": "单张帧图超过 8 MB。"}, status=413)
+            return
+        body = self.rfile.read(length)
+        result = api_upload_browser_frame(
+            (query.get("game") or [""])[0],
+            (query.get("atSec") or [""])[0],
+            body,
+            self.headers.get("Content-Type") or "",
+        )
+        self._send_json(result, status=200 if result.get("ok") else 400)
 
     def _send_frame(self, query: dict[str, list[str]]) -> None:
         """把抽出来的帧图发给标注页。

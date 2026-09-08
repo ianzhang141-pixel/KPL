@@ -62,6 +62,17 @@
   .cand:hover { border-color:#3b82f6; }
   .note { border-left:3px solid #3b82f6; padding:2px 0 2px 12px; color:#9aa3b2;
           font-size:13px; margin:12px 0 0; white-space:pre-wrap; }
+  .drop { border:2px dashed #3b82f6; border-radius:10px; padding:22px 16px;
+          text-align:center; cursor:pointer; background:#101824; transition:.15s; }
+  .drop:hover, .drop.drag { background:#14233a; border-color:#7aa7ff; }
+  .drop strong { display:block; font-size:15px; margin-bottom:3px; }
+  .privacy { margin:10px 0; padding:10px 12px; border-radius:7px; color:#a7f3d0;
+             background:#0d241c; border:1px solid #165c43; font-size:13px; }
+  .video-preview { display:none; width:100%; max-height:420px; margin:12px 0;
+                   background:#000; border-radius:8px; }
+  progress { width:100%; height:14px; margin-top:10px; accent-color:#3b82f6; }
+  details { margin-top:12px; }
+  summary { cursor:pointer; color:#8b93a1; }
 </style>
 
 <h1>王者荣耀决策实验室 · 数据控制台</h1>
@@ -132,20 +143,43 @@
 </div>
 
 <div class="card">
-  <h2><span class="step" id="s4">4</span> 从录像抽帧<span class="pill" id="ffPill">需要 ffmpeg</span></h2>
+  <h2><span class="step" id="s4">4</span> 选择录像并在本机抽帧<span class="pill on">不复制整段录像</span></h2>
   <p class="hint">
-    把录像按固定间隔切成图片，供标注页逐帧核对。
-    间隔默认 30 秒：王者一局通常 15~20 分钟，一分钟一帧会漏掉整场团战。
+    把录像拖到下面。浏览器直接使用电脑算力解码，整段录像不会上传到本站、GitHub或第三方，
+    只保存每30秒一张的压缩图片。20分钟录像通常只留下约40张图。
   </p>
+  <div class="privacy">🔒 本地处理：页面只把抽出的 JPEG 图片交给运行在 127.0.0.1 的本地系统。</div>
   <div class="row">
-    <div style="flex:2"><label>比赛编号</label><select id="exGame"></select></div>
-    <div style="flex:3"><label>录像文件的完整路径</label>
-      <input type="text" id="exVideo" placeholder="/Users/你的名字/Downloads/xxx.mp4"></div>
-    <div style="flex:0;min-width:90px"><label>间隔（秒）</label><input type="number" id="exEvery" value="30"></div>
-    <div style="flex:0"><button onclick="extract()">开始抽帧</button></div>
+    <div style="flex:2"><label>比赛编号（先在上一步建立）</label><select id="exGame"></select></div>
+    <div style="flex:0;min-width:105px"><label>间隔（秒）</label><input type="number" id="exEvery" value="30" min="1"></div>
+    <div style="flex:0;min-width:105px"><label>从第几秒</label><input type="number" id="exStart" value="0" min="0"></div>
+    <div style="flex:0;min-width:105px"><label>到第几秒</label><input type="number" id="exEnd" placeholder="自动到结尾" min="0"></div>
   </div>
-  <div class="msg" id="exMsg"></div>
-  <pre class="log" id="jobLog" style="display:none"></pre>
+  <div class="drop" id="videoDrop" tabindex="0">
+    <strong>把 MP4 / MOV / M4V 录像拖到这里</strong>
+    或点击这里选择文件；iCloud、Dropbox、OneDrive同步文件夹里的录像也可以直接选
+    <input type="file" id="videoFile" accept="video/mp4,video/quicktime,video/x-m4v,video/webm" hidden>
+  </div>
+  <video id="localVideo" class="video-preview" controls playsinline muted></video>
+  <div id="videoInfo" class="hint" style="margin-top:10px"></div>
+  <div class="row" style="margin-top:10px">
+    <div style="flex:0"><button id="localExtractButton" onclick="extractLocal()" disabled>在本机提取图片</button></div>
+    <div style="flex:0"><button id="cancelExtractButton" class="ghost" onclick="cancelLocalExtract()" disabled>停止</button></div>
+  </div>
+  <progress id="localProgress" value="0" max="1" style="display:none"></progress>
+  <div class="msg" id="localMsg"></div>
+
+  <details>
+    <summary>兼容模式：已经知道录像在电脑上的完整路径</summary>
+    <p class="hint">这种方式使用 ffmpeg，仍然不会复制整段录像，适合浏览器不能播放的格式。</p>
+    <div class="row">
+      <div style="flex:3"><label>录像文件的完整路径</label>
+        <input type="text" id="exVideo" placeholder="/Users/你的名字/Downloads/xxx.mp4"></div>
+      <div style="flex:0"><button onclick="extract()">使用 ffmpeg 抽帧</button></div>
+    </div>
+    <div class="msg" id="exMsg"></div>
+    <pre class="log" id="jobLog" style="display:none"></pre>
+  </details>
 </div>
 
 <div class="card">
@@ -176,7 +210,8 @@
 
 <script>
 const $ = id => document.getElementById(id);
-let STATUS = null, jobTimer = null;
+let STATUS = null, jobTimer = null, localVideoFile = null, localVideoUrl = null;
+let localExtractCancelled = false;
 
 function msg(id, text, kind='ok') {
   const el = $(id); el.className = 'msg ' + kind; el.textContent = text;
@@ -188,6 +223,135 @@ async function api(path, body) {
   const res = await fetch(path, opt);
   return res.json();
 }
+
+function bytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+  return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+
+function clock(sec) {
+  sec = Math.max(0, Math.round(sec));
+  return Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0');
+}
+
+function chooseVideo(file) {
+  if (!file) return;
+  localVideoFile = file;
+  if (localVideoUrl) URL.revokeObjectURL(localVideoUrl);
+  localVideoUrl = URL.createObjectURL(file);
+  const player = $('localVideo');
+  player.src = localVideoUrl;
+  player.style.display = 'block';
+  $('localExtractButton').disabled = true;
+  msg('localMsg', '正在读取录像信息…', 'ok');
+  player.onloadedmetadata = () => {
+    $('videoInfo').textContent = `${file.name} · ${bytes(file.size)} · ` +
+      `${player.videoWidth}×${player.videoHeight} · ${clock(player.duration)}`;
+    $('exEnd').placeholder = '自动到 ' + Math.floor(player.duration) + ' 秒';
+    $('localExtractButton').disabled = false;
+    msg('localMsg', '录像已准备好。整段文件仍在原位置，没有复制。', 'ok');
+  };
+  player.onerror = () => {
+    $('localExtractButton').disabled = true;
+    msg('localMsg', '浏览器不能播放这个文件。请转换为 MP4，或展开下方“兼容模式”使用文件路径。', 'err');
+  };
+  player.load();
+}
+
+function waitForSeek(player, atSec) {
+  const samePosition = Math.abs(player.currentTime - atSec) < 0.02;
+  if (samePosition && player.readyState >= 2) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let timer;
+    const finish = error => {
+      clearTimeout(timer);
+      player.removeEventListener('seeked', done);
+      player.removeEventListener('loadeddata', done);
+      player.removeEventListener('error', failed);
+      error ? reject(error) : resolve();
+    };
+    const done = () => finish();
+    const failed = () => finish(new Error('浏览器读取录像失败。'));
+    timer = setTimeout(() => finish(new Error('读取这一帧超过20秒。云端文件可能还在下载。')), 20000);
+    player.addEventListener(samePosition ? 'loadeddata' : 'seeked', done, {once:true});
+    player.addEventListener('error', failed, {once:true});
+    if (!samePosition) player.currentTime = atSec;
+  });
+}
+
+function canvasJpeg(canvas) {
+  return new Promise((resolve, reject) => canvas.toBlob(
+    blob => blob ? resolve(blob) : reject(new Error('浏览器无法生成截图。')),
+    'image/jpeg', 0.82
+  ));
+}
+
+async function extractLocal() {
+  const gameId = $('exGame').value;
+  const player = $('localVideo');
+  const every = parseFloat($('exEvery').value);
+  const start = Math.max(0, parseFloat($('exStart').value) || 0);
+  const rawEnd = parseFloat($('exEnd').value);
+  const end = Number.isFinite(rawEnd) ? Math.min(rawEnd, player.duration) : player.duration;
+  if (!gameId) { msg('localMsg', '请先在上一步建立一场比赛。', 'err'); return; }
+  if (!localVideoFile || !Number.isFinite(player.duration)) { msg('localMsg', '请先选择录像。', 'err'); return; }
+  if (!Number.isFinite(every) || every <= 0) { msg('localMsg', '抽帧间隔必须大于0秒。', 'err'); return; }
+  if (end <= start) { msg('localMsg', '结束时间必须晚于开始时间。', 'err'); return; }
+  const total = Math.ceil((end - start) / every);
+  if (total > 2000) { msg('localMsg', '一次最多提取2000张图，请增大间隔。', 'err'); return; }
+
+  const registered = await api('/api/video/register', {
+    gameId, fileName: localVideoFile.name, sizeBytes: localVideoFile.size,
+    durationSec: player.duration, width: player.videoWidth, height: player.videoHeight,
+    everySec: every,
+  });
+  if (!registered.ok) { msg('localMsg', registered.error, 'err'); return; }
+
+  localExtractCancelled = false;
+  $('localExtractButton').disabled = true;
+  $('cancelExtractButton').disabled = false;
+  $('localProgress').style.display = 'block';
+  $('localProgress').max = total;
+  $('localProgress').value = 0;
+  player.pause();
+  const canvas = document.createElement('canvas');
+  const width = Math.min(1280, player.videoWidth);
+  canvas.width = width;
+  canvas.height = Math.round(player.videoHeight * width / player.videoWidth);
+  const context = canvas.getContext('2d', {alpha:false});
+
+  let done = 0;
+  try {
+    for (let at = start; at < end; at += every) {
+      if (localExtractCancelled) break;
+      msg('localMsg', `正在读取 ${clock(at)}，已完成 ${done}/${total}…`, 'ok');
+      await waitForSeek(player, Math.min(at, Math.max(0, player.duration - 0.05)));
+      context.drawImage(player, 0, 0, canvas.width, canvas.height);
+      const blob = await canvasJpeg(canvas);
+      const res = await fetch(`/api/frame/upload?game=${encodeURIComponent(gameId)}&atSec=${encodeURIComponent(at.toFixed(3))}`, {
+        method:'POST', headers:{'Content-Type':'image/jpeg'}, body:blob,
+      });
+      const saved = await res.json();
+      if (!saved.ok) throw new Error(saved.error || '截图保存失败。');
+      done += 1;
+      $('localProgress').value = done;
+    }
+    msg('localMsg', localExtractCancelled
+      ? `已停止，已经保存 ${done} 张图片。整段录像没有复制。`
+      : `完成：保存 ${done} 张图片。现在可以点击下方比赛清单里的“标注”。`,
+      localExtractCancelled ? 'warn' : 'ok');
+    await refresh();
+  } catch (error) {
+    msg('localMsg', `提取中断：${error.message}`, 'err');
+  } finally {
+    $('localExtractButton').disabled = false;
+    $('cancelExtractButton').disabled = true;
+  }
+}
+
+function cancelLocalExtract() { localExtractCancelled = true; }
 
 async function refresh() {
   STATUS = await api('/api/status');
@@ -205,8 +369,6 @@ async function refresh() {
   $('envFfmpeg').innerHTML = v.ok
     ? `<span class="pill on">已安装</span> <code>${v.ffmpeg}</code>`
     : `<span class="pill off">未安装</span> 不影响人工标注，只是不能自动抽帧。<code>brew install ffmpeg</code>`;
-  $('ffPill').className = 'pill ' + (v.ok ? 'on' : 'off');
-  $('ffPill').textContent = v.ok ? 'ffmpeg 可用' : '需要 ffmpeg';
 
   const o = STATUS.ocr;
   $('envOcr').innerHTML = o.autoAvailable
@@ -313,4 +475,27 @@ async function pollJob() {
 }
 
 refresh();
+
+const drop = $('videoDrop');
+drop.addEventListener('click', () => $('videoFile').click());
+drop.addEventListener('keydown', event => {
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    $('videoFile').click();
+  }
+});
+$('videoFile').addEventListener('change', event => chooseVideo(event.target.files[0]));
+for (const name of ['dragenter', 'dragover']) {
+  drop.addEventListener(name, event => {
+    event.preventDefault();
+    drop.classList.add('drag');
+  });
+}
+for (const name of ['dragleave', 'drop']) {
+  drop.addEventListener(name, event => {
+    event.preventDefault();
+    drop.classList.remove('drag');
+  });
+}
+drop.addEventListener('drop', event => chooseVideo(event.dataTransfer.files[0]));
 </script>

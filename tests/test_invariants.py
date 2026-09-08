@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from kplab import annotate, evaluate, ocr, paths, rules, schema, state, store  # noqa: E402
+from kplab import annotate, evaluate, ocr, paths, rules, schema, state, store, video  # noqa: E402
 
 
 def ocr_field(value, confidence=0.9):
@@ -308,6 +308,32 @@ class DataDirectoryDiscovery(unittest.TestCase):
             chosen = Path(raw) / "chosen"
             with patch.dict("os.environ", {"KPLAB_DATA": "/should/not/win"}):
                 self.assertEqual(paths.find_data_dir(str(chosen)), chosen.resolve())
+
+
+class BrowserFrameIngestion(unittest.TestCase):
+    """网页只上传抽出的帧，服务端必须把它当图片而不是任意文件。"""
+
+    JPEG = b"\xff\xd8\xff\xe0browser-generated-frame\xff\xd9"
+
+    def test_saves_one_browser_frame_with_parseable_timestamp(self):
+        with tempfile.TemporaryDirectory() as raw:
+            result = video.save_browser_frame(Path(raw), 60.125, self.JPEG, "image/jpeg")
+            saved = Path(raw) / result["file"]
+            self.assertTrue(saved.is_file())
+            self.assertEqual(saved.read_bytes(), self.JPEG)
+            self.assertTrue(saved.name.endswith("60.125s.jpg"))
+
+    def test_rejects_non_image_content_even_with_image_mime(self):
+        with tempfile.TemporaryDirectory() as raw:
+            with self.assertRaises(video.VideoError):
+                video.save_browser_frame(Path(raw), 30, b"not an image", "image/jpeg")
+            self.assertEqual(list(Path(raw).iterdir()), [])
+
+    def test_rejects_invalid_or_unbounded_timestamp(self):
+        with tempfile.TemporaryDirectory() as raw:
+            for value in (-1, float("nan"), 24 * 60 * 60 + 1):
+                with self.assertRaises(video.VideoError):
+                    video.save_browser_frame(Path(raw), value, self.JPEG, "image/jpeg")
 
 
 if __name__ == "__main__":

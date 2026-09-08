@@ -25,6 +25,7 @@ LOL 那边是 `riot.fetch_timeline()` 一个 HTTPS 请求就拿到全部数据�
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -34,6 +35,9 @@ from typing import Any
 
 class VideoError(RuntimeError):
     pass
+
+
+BROWSER_FRAME_MAX_BYTES = 8 * 1024 * 1024
 
 
 INSTALL_HINT = (
@@ -194,6 +198,42 @@ def extract_frames(
         at += every_sec
 
     return records
+
+
+def save_browser_frame(
+    out_dir: Path, at_sec: float, body: bytes, content_type: str
+) -> dict[str, Any]:
+    """保存浏览器在本机解码出来的一帧，不接收整段录像。
+
+    这个入口只允许 JPEG/PNG，并同时检查文件头，避免网页把任意内容写进
+    frames 目录。相同时间点重复提取会原子替换旧图，不产生重复垃圾文件。
+    """
+    try:
+        at_sec = float(at_sec)
+    except (TypeError, ValueError):
+        raise VideoError("帧时间必须是数字。") from None
+    if not math.isfinite(at_sec) or not 0 <= at_sec <= 24 * 60 * 60:
+        raise VideoError("帧时间必须在 0 秒到 24 小时之间。")
+    if not body:
+        raise VideoError("收到的是空图片。")
+    if len(body) > BROWSER_FRAME_MAX_BYTES:
+        raise VideoError("单张帧图超过 8 MB，请降低截图宽度或画质。")
+
+    mime = content_type.partition(";")[0].strip().lower()
+    if mime == "image/jpeg" and body.startswith(b"\xff\xd8\xff") and body.endswith(b"\xff\xd9"):
+        suffix = "jpg"
+    elif mime == "image/png" and body.startswith(b"\x89PNG\r\n\x1a\n"):
+        suffix = "png"
+    else:
+        raise VideoError("只接受浏览器生成的 JPEG 或 PNG 帧图。")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    target = out_dir / f"browser_{at_sec:010.3f}s.{suffix}"
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    temporary.write_bytes(body)
+    temporary.replace(target)
+    return {"ok": True, "file": target.name, "atSec": round(at_sec, 3),
+            "bytes": len(body)}
 
 
 def crop_region(
