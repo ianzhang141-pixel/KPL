@@ -1,0 +1,316 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>王者荣耀决策实验室 · 控制台</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:28px 32px 80px; background:#0f1216; color:#e6e9ef;
+         font:14px/1.6 -apple-system,"PingFang SC",system-ui,sans-serif;
+         font-variant-numeric: tabular-nums; max-width:1080px; }
+  a { color:#7aa7ff; }
+  h1 { font-size:21px; margin:0 0 4px; }
+  .sub { color:#8b93a1; margin:0 0 22px; font-size:13px; }
+  .card { background:#171b22; border:1px solid #232935; border-radius:10px;
+          padding:18px 20px; margin-bottom:14px; }
+  .card h2 { font-size:15px; margin:0 0 3px; display:flex; align-items:center; gap:9px; }
+  .card .hint { color:#8b93a1; font-size:13px; margin:0 0 14px; }
+  .step { display:inline-flex; width:22px; height:22px; border-radius:50%;
+          background:#3b82f6; color:#fff; font-size:12px; font-weight:700;
+          align-items:center; justify-content:center; flex:none; }
+  .step.done { background:#16a34a; } .step.wait { background:#3a4150; }
+  input[type=text], input[type=number], select {
+    background:#0f1216; border:1px solid #2f3644; color:#e6e9ef; border-radius:7px;
+    padding:9px 11px; font:inherit; font-size:13px; width:100%; }
+  input:focus, select:focus { outline:none; border-color:#3b82f6; }
+  label { display:block; color:#8b93a1; font-size:12px; margin:0 0 5px; }
+  .row { display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; margin-bottom:10px; }
+  .row > div { flex:1; min-width:130px; }
+  button { background:#3b82f6; border:1px solid #3b82f6; color:#fff; border-radius:7px;
+           padding:9px 16px; font:inherit; font-size:13px; font-weight:500;
+           cursor:pointer; white-space:nowrap; }
+  button:hover:not(:disabled) { background:#2f74e6; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button.ghost { background:#232935; border-color:#2f3644; color:#e6e9ef; }
+  button.ghost:hover:not(:disabled) { background:#2c3441; }
+  .msg { margin-top:9px; font-size:13px; padding:9px 12px; border-radius:7px;
+         display:none; white-space:pre-wrap; }
+  .msg.ok  { display:block; background:#0d2a17; border:1px solid #16663a; color:#86efac; }
+  .msg.err { display:block; background:#2a1113; border:1px solid #7a2a2f; color:#fca5a5; }
+  .msg.warn{ display:block; background:#2a2211; border:1px solid #7a5f2a; color:#fcd34d; }
+  .stat { display:flex; gap:22px; flex-wrap:wrap; }
+  .stat > div { min-width:110px; }
+  .stat b { display:block; font-size:19px; font-weight:600; }
+  .stat span { color:#8b93a1; font-size:12px; }
+  .good { color:#4ade80; } .bad { color:#f87171; } .warn { color:#fbbf24; }
+  code { background:#232935; padding:2px 6px; border-radius:4px; font-size:12px;
+         word-break:break-all; }
+  table { width:100%; border-collapse:collapse; font-size:13px; margin-top:6px; }
+  th { text-align:left; color:#8b93a1; font-weight:500; font-size:12px;
+       border-bottom:1px solid #232935; padding:7px 8px; }
+  td { padding:7px 8px; border-bottom:1px solid #1c212a; }
+  tr:hover td { background:#1b2029; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:99px; font-size:11px;
+          border:1px solid #2f3644; color:#8b93a1; }
+  .pill.on { border-color:#16663a; color:#86efac; background:#0d2a17; }
+  .pill.off{ border-color:#7a2a2f; color:#fca5a5; background:#2a1113; }
+  pre.log { background:#0b0e12; border:1px solid #232935; border-radius:7px;
+            padding:12px; font-size:12px; max-height:260px; overflow:auto;
+            white-space:pre-wrap; margin:10px 0 0; }
+  .cand { display:flex; justify-content:space-between; align-items:center; gap:12px;
+          padding:9px 12px; margin-top:7px; background:#0f1216;
+          border:1px solid #232935; border-radius:7px; font-size:13px; }
+  .cand:hover { border-color:#3b82f6; }
+  .note { border-left:3px solid #3b82f6; padding:2px 0 2px 12px; color:#9aa3b2;
+          font-size:13px; margin:12px 0 0; white-space:pre-wrap; }
+</style>
+
+<h1>王者荣耀决策实验室 · 数据控制台</h1>
+<p class="sub">
+  先把真实数据核对清楚，再谈胜率模型。
+  <a href="/annotate">标注页</a> ·
+  <a href="/debug">逐帧核对页</a>
+</p>
+
+<div class="card">
+  <h2><span class="step" id="s1">1</span> 数据目录</h2>
+  <p class="hint">所有比赛数据都存在这里。压缩存储，一场大约几百 KB（不含帧图）。</p>
+  <div class="row">
+    <div class="grow"><label>路径</label><input type="text" id="dataDir"></div>
+    <div style="flex:0"><button onclick="saveDir()">使用这个目录</button></div>
+    <div style="flex:0"><button class="ghost" onclick="scanDirs()">自动查找</button></div>
+  </div>
+  <div id="cands"></div>
+  <div class="msg" id="dirMsg"></div>
+  <div class="stat" style="margin-top:14px">
+    <div><b id="nGames">—</b><span>比赛</span></div>
+    <div><b id="nObs">—</b><span>有观测</span></div>
+    <div><b id="nAnn">—</b><span>有标注</span></div>
+    <div><b id="nSize">—</b><span>占用</span></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2><span class="step" id="s2">2</span> 环境自检</h2>
+  <p class="hint">这两项都不是必需的 —— 人工标注那条路一样东西都不用装，而且必须先走。</p>
+  <table>
+    <tr><td style="width:170px">抽帧（ffmpeg）</td><td id="envFfmpeg">—</td></tr>
+    <tr><td>自动识别</td><td id="envOcr">—</td></tr>
+    <tr><td>游戏常量</td><td id="envRules">—</td></tr>
+    <tr><td>HUD 标定</td><td id="envHud">—</td></tr>
+  </table>
+  <div class="note" id="minimapNote"></div>
+</div>
+
+<div class="card">
+  <h2><span class="step" id="s3">3</span> 建立一场比赛</h2>
+  <p class="hint">
+    编号建议写成 <code>KPL2026S1_AG_vs_EST_G1</code> 这种一眼看得懂的格式。
+    <b>胜负现在就填</b> —— 它是将来训练胜率模型唯一的标签，事后补要重新翻录像。
+  </p>
+  <div class="row">
+    <div style="flex:2"><label>比赛编号</label><input type="text" id="gid" placeholder="KPL2026S1_AG_vs_EST_G1"></div>
+    <div><label>赛事</label><input type="text" id="tour" placeholder="KPL 2026 春季赛"></div>
+  </div>
+  <div class="row">
+    <div><label>蓝方战队</label><input type="text" id="blue"></div>
+    <div><label>红方战队</label><input type="text" id="red"></div>
+    <div><label>谁赢了</label>
+      <select id="win">
+        <option value="">还不知道</option>
+        <option value="1">蓝方</option>
+        <option value="0">红方</option>
+      </select></div>
+    <div><label>数据来源</label>
+      <select id="srcKind">
+        <option value="broadcast">职业转播</option>
+        <option value="replay">游戏内回放</option>
+        <option value="manual">纯人工记录</option>
+      </select></div>
+    <div style="flex:0"><button onclick="createGame()">建立</button></div>
+  </div>
+  <div class="msg" id="gameMsg"></div>
+</div>
+
+<div class="card">
+  <h2><span class="step" id="s4">4</span> 从录像抽帧<span class="pill" id="ffPill">需要 ffmpeg</span></h2>
+  <p class="hint">
+    把录像按固定间隔切成图片，供标注页逐帧核对。
+    间隔默认 30 秒：王者一局通常 15~20 分钟，一分钟一帧会漏掉整场团战。
+  </p>
+  <div class="row">
+    <div style="flex:2"><label>比赛编号</label><select id="exGame"></select></div>
+    <div style="flex:3"><label>录像文件的完整路径</label>
+      <input type="text" id="exVideo" placeholder="/Users/你的名字/Downloads/xxx.mp4"></div>
+    <div style="flex:0;min-width:90px"><label>间隔（秒）</label><input type="number" id="exEvery" value="30"></div>
+    <div style="flex:0"><button onclick="extract()">开始抽帧</button></div>
+  </div>
+  <div class="msg" id="exMsg"></div>
+  <pre class="log" id="jobLog" style="display:none"></pre>
+</div>
+
+<div class="card">
+  <h2><span class="step wait" id="s5">5</span> 比赛清单</h2>
+  <p class="hint">
+    「标注」是人工填的，完全可信；「观测」包含人工和机器识别两种。
+    <b>先标注，再考虑自动识别</b> —— 没有人工标注就无法验证识别准不准。
+  </p>
+  <table>
+    <thead><tr><th>比赛</th><th>对阵</th><th>帧图</th><th>标注</th><th>观测</th><th>胜负</th><th></th></tr></thead>
+    <tbody id="gameRows"><tr><td colspan="7" style="color:#8b93a1">还没有比赛。</td></tr></tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>核对游戏常量</h2>
+  <p class="hint">
+    这些是<b>凭印象写的默认值，不是查证过的事实</b>。版本更新会改动它们，
+    而错的常量会让完整性检查的上限校验一起失效。
+    对着游戏确认一条，就点一次「确认」。
+  </p>
+  <table>
+    <thead><tr><th>常量</th><th style="width:110px">值</th><th style="width:90px">状态</th><th></th></tr></thead>
+    <tbody id="ruleRows"></tbody>
+  </table>
+  <div class="msg" id="ruleMsg"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let STATUS = null, jobTimer = null;
+
+function msg(id, text, kind='ok') {
+  const el = $(id); el.className = 'msg ' + kind; el.textContent = text;
+  if (!text) el.className = 'msg';
+}
+async function api(path, body) {
+  const opt = body ? {method:'POST', headers:{'Content-Type':'application/json'},
+                      body: JSON.stringify(body)} : {};
+  const res = await fetch(path, opt);
+  return res.json();
+}
+
+async function refresh() {
+  STATUS = await api('/api/status');
+  $('dataDir').value = STATUS.dataDir;
+  const inv = STATUS.inventory || {games:[]};
+  $('nGames').textContent = inv.total ?? 0;
+  $('nObs').textContent = inv.withObservations ?? 0;
+  $('nAnn').textContent = inv.annotatedGames ?? 0;
+  $('nSize').textContent = inv.totalBytesHuman ?? '0 B';
+  $('s1').className = 'step ' + (STATUS.dataDirExists ? 'done' : '');
+  $('s3').className = 'step ' + (inv.total ? 'done' : '');
+  $('s5').className = 'step ' + (inv.annotatedGames ? 'done' : 'wait');
+
+  const v = STATUS.video;
+  $('envFfmpeg').innerHTML = v.ok
+    ? `<span class="pill on">已安装</span> <code>${v.ffmpeg}</code>`
+    : `<span class="pill off">未安装</span> 不影响人工标注，只是不能自动抽帧。<code>brew install ffmpeg</code>`;
+  $('ffPill').className = 'pill ' + (v.ok ? 'on' : 'off');
+  $('ffPill').textContent = v.ok ? 'ffmpeg 可用' : '需要 ffmpeg';
+
+  const o = STATUS.ocr;
+  $('envOcr').innerHTML = o.autoAvailable
+    ? `<span class="pill on">${o.autoBackend}</span> 识别结果仍需抽样核对。`
+    : `<span class="pill off">无</span> 这不影响开始工作 —— 人工标注不需要它，而且必须先有人工标注才能验证识别。`;
+
+  const r = STATUS.rules;
+  $('envRules').innerHTML = r.unverifiedCount
+    ? `<span class="pill off">${r.unverifiedCount} 条待核对</span> 见页面最下方。`
+    : `<span class="pill on">已全部核对</span>`;
+  $('s2').className = 'step ' + (r.unverifiedCount ? '' : 'done');
+
+  const profiles = Object.entries(STATUS.profiles || {});
+  $('envHud').innerHTML = profiles.map(([k, p]) =>
+    `<span class="pill ${p.verdict.ok ? 'on' : 'off'}">${k}</span> ${p.verdict.message}`
+  ).join('<br>');
+  $('minimapNote').textContent = STATUS.minimapNote || '';
+
+  const sel = $('exGame'); const prev = sel.value;
+  sel.innerHTML = inv.games.map(g => `<option value="${g.gameId}">${g.gameId}</option>`).join('');
+  if (prev) sel.value = prev;
+
+  $('gameRows').innerHTML = inv.games.length ? inv.games.map(g => `
+    <tr>
+      <td><code>${g.gameId}</code></td>
+      <td>${g.blueTeam || '?'} vs ${g.redTeam || '?'}</td>
+      <td>${g.frameImages || '—'}</td>
+      <td class="${g.annotationCount ? 'good' : ''}">${g.annotationCount || '—'}</td>
+      <td>${g.observationCount || '—'}</td>
+      <td>${g.blueWin === true ? '蓝胜' : g.blueWin === false ? '红胜' : '<span class="warn">未记录</span>'}</td>
+      <td>
+        <a href="/annotate?game=${encodeURIComponent(g.gameId)}">标注</a> ·
+        <a href="/debug?game=${encodeURIComponent(g.gameId)}">核对</a>
+      </td>
+    </tr>`).join('') : '<tr><td colspan="7" style="color:#8b93a1">还没有比赛。</td></tr>';
+
+  $('ruleRows').innerHTML = Object.entries(r.table).map(([k, e]) => `
+    <tr>
+      <td><code>${k}</code><br><span style="color:#8b93a1;font-size:12px">${e.what}</span></td>
+      <td><input type="number" id="rv_${k}" value="${e.value}"></td>
+      <td>${e.verified ? '<span class="pill on">已核对</span>' : '<span class="pill off">待核对</span>'}</td>
+      <td><button class="ghost" onclick="saveRule('${k}')">确认</button></td>
+    </tr>`).join('');
+}
+
+async function saveDir() {
+  const res = await api('/api/datadir', {path: $('dataDir').value});
+  msg('dirMsg', res.ok ? '已切换到 ' + res.dataDir : res.error, res.ok ? 'ok' : 'err');
+  if (res.ok) refresh();
+}
+async function scanDirs() {
+  msg('dirMsg', '正在你的个人文件夹里找…', 'ok');
+  const res = await api('/api/datadir/scan');
+  msg('dirMsg', '');
+  $('cands').innerHTML = (res.candidates || []).map(c => `
+    <div class="cand">
+      <span><code>${c.path}</code> ${c.hasKpl ? '<span class="pill on">有王者数据</span>' : ''}
+        ${c.games ? c.games + ' 场' : ''}</span>
+      <button class="ghost" onclick="pick('${c.path.replace(/'/g, "\\'")}')">用这个</button>
+    </div>`).join('') || '<p class="hint">没找到候选目录，手动填路径即可。</p>';
+}
+function pick(p) { $('dataDir').value = p; saveDir(); }
+
+async function createGame() {
+  const win = $('win').value;
+  const res = await api('/api/game/create', {
+    gameId: $('gid').value.trim(), tournament: $('tour').value,
+    blueTeam: $('blue').value, redTeam: $('red').value,
+    sourceKind: $('srcKind').value,
+    blueWin: win === '' ? null : win === '1',
+  });
+  if (!res.ok) { msg('gameMsg', res.error, 'err'); return; }
+  msg('gameMsg', '已建立 ' + res.gameId +
+      (win === '' ? '\n⚠️ 胜负没填。它是训练模型唯一的标签，建议现在就补上。' : ''),
+      win === '' ? 'warn' : 'ok');
+  $('gid').value = '';
+  refresh();
+}
+
+async function saveRule(key) {
+  const res = await api('/api/rules', {key, value: $('rv_' + key).value, by: '网页核对'});
+  msg('ruleMsg', res.ok ? `已记录并标记为核对过。还剩 ${res.unverified.length} 条。` : res.error,
+      res.ok ? 'ok' : 'err');
+  refresh();
+}
+
+async function extract() {
+  const res = await api('/api/extract', {
+    gameId: $('exGame').value, video: $('exVideo').value.trim(),
+    everySec: parseFloat($('exEvery').value) || 30,
+  });
+  if (!res.started) { msg('exMsg', res.reason || '启动失败', 'err'); return; }
+  msg('exMsg', '已开始，进度见下方。', 'ok');
+  $('jobLog').style.display = 'block';
+  if (jobTimer) clearInterval(jobTimer);
+  jobTimer = setInterval(pollJob, 900);
+}
+async function pollJob() {
+  const job = await api('/api/job');
+  $('jobLog').textContent =
+    (job.total ? `进度 ${job.done}/${job.total}\n` : '') + (job.lines || []).join('\n');
+  $('jobLog').scrollTop = $('jobLog').scrollHeight;
+  if (!job.running && job.finished) { clearInterval(jobTimer); jobTimer = null; refresh(); }
+}
+
+refresh();
+</script>

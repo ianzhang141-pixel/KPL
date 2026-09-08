@@ -1,0 +1,194 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>王者荣耀决策实验室 · 逐帧核对</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:20px 24px 80px; background:#0f1216; color:#e6e9ef;
+         font:14px/1.55 -apple-system,"PingFang SC",system-ui,sans-serif;
+         font-variant-numeric: tabular-nums; max-width:1180px; }
+  a { color:#7aa7ff; }
+  h1 { font-size:19px; margin:0 0 3px; }
+  .sub { color:#8b93a1; margin:0 0 16px; font-size:13px; }
+  .card { background:#171b22; border:1px solid #232935; border-radius:10px;
+          padding:16px 18px; margin-bottom:14px; }
+  .card h2 { font-size:14px; margin:0 0 10px; }
+  select, input { background:#0f1216; border:1px solid #2f3644; color:#e6e9ef;
+                  border-radius:6px; padding:7px 9px; font:inherit; font-size:13px; }
+  button { background:#232935; border:1px solid #2f3644; color:#e6e9ef; border-radius:6px;
+           padding:6px 12px; font:inherit; font-size:12px; cursor:pointer; }
+  button.on { background:#3b82f6; border-color:#3b82f6; color:#fff; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+  .strip { display:flex; gap:5px; overflow-x:auto; padding:8px 0; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; color:#8b93a1; font-weight:500; font-size:12px;
+       border-bottom:1px solid #232935; padding:6px 7px; }
+  td { padding:6px 7px; border-bottom:1px solid #1c212a; }
+  .blue td:first-child { border-left:3px solid #3b82f6; }
+  .red  td:first-child { border-left:3px solid #ef4444; }
+  .unk { color:#5b6373; }
+  .doubt { color:#fbbf24; }
+  .good { color:#e6e9ef; }
+  .src { font-size:10px; color:#5b6373; margin-left:3px; }
+  .bar { height:7px; background:#232935; border-radius:99px; overflow:hidden; width:180px; }
+  .bar > i { display:block; height:100%; background:#3b82f6; }
+  .legend { color:#8b93a1; font-size:12px; border-left:3px solid #3b82f6;
+            padding-left:10px; white-space:pre-wrap; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  @media (max-width:900px) { .grid2 { grid-template-columns:1fr; } }
+  .map { position:relative; width:100%; aspect-ratio:1; background:#12161d;
+         border:1px solid #232935; border-radius:8px; }
+  .dot { position:absolute; width:15px; height:15px; border-radius:50%;
+         transform:translate(-50%,-50%); font-size:9px; line-height:15px;
+         text-align:center; color:#fff; font-weight:700; border:2px solid #0f1216; }
+  .ev { font-size:12px; padding:4px 0; border-bottom:1px solid #1c212a; }
+</style>
+
+<h1>逐帧核对 · <span id="gameName">—</span></h1>
+<p class="sub">
+  <a href="/">← 控制台</a> · <a id="annLink" href="/annotate">标注页</a>
+</p>
+
+<div class="card">
+  <div class="row">
+    <select id="gameSel"></select>
+    <span id="meta" style="color:#8b93a1;font-size:13px"></span>
+  </div>
+  <div class="strip" id="strip"></div>
+  <p class="legend">
+白色 = 可信的值    <span class="doubt">黄色带 ?</span> = 置信度不够，只能参考
+    <span class="unk">灰色 —</span> = 不知道
+这三种<b>必须长得不一样</b>。把识别猜出来的数字和人工核对过的数字显示成一个样子，
+是这类系统最容易犯、也最难发现的错误。
+  </p>
+</div>
+
+<div class="grid2">
+  <div class="card">
+    <h2>双方局势</h2>
+    <table id="teams"></table>
+    <div style="margin-top:12px">
+      <span style="color:#8b93a1;font-size:12px">这一帧的字段覆盖</span>
+      <div class="row" style="margin:5px 0 0"><div class="bar"><i id="covBar"></i></div>
+        <span id="covText" style="font-size:12px;color:#8b93a1"></span></div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>小地图</h2>
+    <div class="map" id="map"></div>
+    <p class="legend" style="margin-top:10px" id="mapNote"></p>
+  </div>
+</div>
+
+<div class="card">
+  <h2>十名选手</h2>
+  <table>
+    <thead><tr><th></th><th>英雄</th><th>分路</th><th>等级</th><th>经济</th>
+      <th>K</th><th>D</th><th>A</th><th>位置</th></tr></thead>
+    <tbody id="players"></tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>这一段里的事件</h2>
+  <div id="events" style="color:#8b93a1;font-size:13px">—</div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let STATE = null, GAME = '', IDX = 0;
+function qs(k) { return new URLSearchParams(location.search).get(k) || ''; }
+async function api(p) { return (await fetch(p)).json(); }
+function fmt(s) { s = Math.max(0, Math.round(s));
+  return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0'); }
+
+// 三种显示状态严格区分：可信 / 存疑 / 未知
+function show(entry) {
+  if (!entry || entry.value === null || entry.value === undefined)
+    return '<span class="unk">—</span>';
+  const label = {manual:'人', ocr:'识', carried:'沿', derived:'算'}[entry.source] || '';
+  const cls = entry.confidence >= 0.75 ? 'good' : 'doubt';
+  const mark = entry.confidence >= 0.75 ? '' : '?';
+  return `<span class="${cls}">${entry.value}${mark}<span class="src">${label}</span></span>`;
+}
+
+async function loadGames() {
+  const inv = await api('/api/games');
+  const want = qs('game') || (inv.games[0] || {}).gameId || '';
+  $('gameSel').innerHTML = inv.games.map(g =>
+    `<option value="${g.gameId}" ${g.gameId===want?'selected':''}>${g.gameId}</option>`).join('');
+  GAME = $('gameSel').value;
+  if (GAME) load();
+}
+$('gameSel').addEventListener('change', () => { GAME = $('gameSel').value; load(); });
+
+async function load() {
+  $('gameName').textContent = GAME;
+  $('annLink').href = '/annotate?game=' + encodeURIComponent(GAME);
+  STATE = await api('/api/state/' + encodeURIComponent(GAME));
+  if (STATE.error) { $('meta').textContent = STATE.error; $('strip').innerHTML=''; return; }
+  const m = STATE.meta;
+  $('meta').textContent =
+    `${m.blueTeam||'?'} vs ${m.redTeam||'?'}    ${m.frameCount} 帧    ` +
+    `覆盖 ${Math.round(STATE.coverage.knownRatio*100)}%、可信 ${Math.round(STATE.coverage.trustedRatio*100)}%` +
+    (m.blueWin === null ? '    ⚠️ 胜负未记录' : '');
+  $('strip').innerHTML = STATE.frames.map((f,i) =>
+    `<button id="b${i}" onclick="pick(${i})">${f.clock}</button>`).join('');
+  pick(0);
+}
+
+function pick(i) {
+  IDX = i;
+  const f = STATE.frames[i];
+  if (!f) return;
+  STATE.frames.forEach((_,j) => $('b'+j).classList.toggle('on', i===j));
+
+  const b = f.teams['100'], r = f.teams['200'];
+  const rows = [
+    ['总经济', b.totalGold, r.totalGold], ['击杀', b.kills, r.kills],
+    ['已拆塔', b.towers, r.towers], ['高地塔', b.highGroundTowers, r.highGroundTowers],
+    ['暴君', b.tyrants, r.tyrants], ['黑暗暴君', b.darkTyrants, r.darkTyrants],
+    ['主宰', b.overlords, r.overlords], ['风暴龙王', b.stormDragons, r.stormDragons],
+    ['先知主宰', b.prophetOverlords, r.prophetOverlords],
+    ['红BUFF', b.redBuffs, r.redBuffs], ['蓝BUFF', b.blueBuffs, r.blueBuffs],
+  ];
+  $('teams').innerHTML =
+    `<thead><tr><th></th><th style="color:#7aa7ff">蓝方</th><th style="color:#f87171">红方</th></tr></thead><tbody>` +
+    rows.map(([label, bv, rv]) =>
+      `<tr><td style="color:#8b93a1">${label}</td><td>${show(bv)}</td><td>${show(rv)}</td></tr>`).join('') +
+    `<tr><td style="color:#8b93a1">经济差(蓝-红)</td><td colspan="2">${show(f.diff.totalGold)}</td></tr></tbody>`;
+
+  $('players').innerHTML = f.players.map(p => {
+    const side = p.teamId === 100 ? 'blue' : 'red';
+    const pos = (p.x && p.x.value !== null && p.y && p.y.value !== null)
+      ? `${p.x.value.toFixed(2)}, ${p.y.value.toFixed(2)}` : '<span class="unk">—</span>';
+    return `<tr class="${side}"><td>${side==='blue'?'蓝':'红'}${(p.slot-1)%5+1}</td>
+      <td>${p.heroName || '<span class="unk">—</span>'}</td>
+      <td>${p.role || '<span class="unk">—</span>'}</td>
+      <td>${show(p.level)}</td><td>${show(p.totalGold)}</td>
+      <td>${show(p.kills)}</td><td>${show(p.deaths)}</td><td>${show(p.assists)}</td>
+      <td>${pos}</td></tr>`;
+  }).join('');
+
+  const known = f.players.filter(p => p.x && p.x.value !== null && p.y && p.y.value !== null);
+  $('map').innerHTML = known.map(p =>
+    `<div class="dot" style="left:${p.x.value*100}%;top:${p.y.value*100}%;
+      background:${p.teamId===100?'#3b82f6':'#ef4444'}">${(p.slot-1)%5+1}</div>`).join('');
+  $('mapNote').textContent = known.length
+    ? `10 个人里有 ${known.length} 个知道位置。`
+    : '这一帧没有任何位置信息。\n没有位置就回答不了「入侵野区值不值」这类问题 —— ' +
+      '因为不知道敌方打野在哪。位置目前只能靠人工在标注页上点小地图。';
+
+  const c = f.coverage;
+  $('covBar').style.width = (c.knownRatio*100) + '%';
+  $('covText').textContent =
+    `${c.knownFields}/${c.totalFields} 个字段有值，其中 ${c.trustedFields} 个够得上可信`;
+
+  $('events').innerHTML = f.recentEvents.length
+    ? f.recentEvents.map(e =>
+        `<div class="ev">${e.clock} · ${e.teamId===100?'蓝方':'红方'} · ${e.type}</div>`).join('')
+    : '—';
+}
+
+loadGames();
+</script>
