@@ -84,7 +84,7 @@ def run(data_dir: Path, game_id: str) -> dict[str, Any]:
     machine = [
         o for o in observations
         if any(
-            schema.src(e) == schema.SOURCE_OCR
+            schema.src(e) in schema.MACHINE_SOURCES
             for e in _flatten(o).values()
         )
     ]

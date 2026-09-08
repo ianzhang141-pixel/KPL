@@ -209,8 +209,8 @@ def _check_sources(built: dict[str, Any], report: dict[str, Any]) -> None:
     report["sourceTally"] = tally
 
     manual = tally.get(schema.SOURCE_MANUAL, 0)
-    ocr = tally.get(schema.SOURCE_OCR, 0)
-    if ocr and not manual:
+    machine = sum(tally.get(s, 0) for s in schema.MACHINE_SOURCES)
+    if machine and not manual:
         report["warnings"].append(
             "这场全部是机器识别、没有一条人工标注。"
             "没有人工标注就没有 ground truth，识别准不准无从验证 —— "
@@ -267,7 +267,8 @@ def format_text(report: dict[str, Any]) -> str:
     if tally:
         readable = {
             schema.SOURCE_MANUAL: "人工", schema.SOURCE_OCR: "识别",
-            schema.SOURCE_CARRIED: "沿用", schema.SOURCE_DERIVED: "推算",
+            schema.SOURCE_CV: "小地图", schema.SOURCE_CARRIED: "沿用",
+            schema.SOURCE_DERIVED: "推算",
             schema.SOURCE_UNKNOWN: "未知",
         }
         parts = [f"{readable.get(k, k)} {v}" for k, v in sorted(tally.items(), key=lambda kv: -kv[1])]
