@@ -266,6 +266,15 @@
 </div>
 
 <div class="card">
+  <h2>S44 经济机制参考库 <span class="pill" id="economyBadge">非官方实测</span></h2>
+  <p class="hint" id="economySummary">正在读取经济机制资料…</p>
+  <div class="note">这份资料来自业余实测，不是官方数据。内部一致的完整公式只能用于带来源和置信度的估算；
+与现有用户确认规则冲突的条目已隔离，不会覆盖赛季常量，也不会充当训练真值。</div>
+  <div id="economyConflicts"></div>
+  <div id="economyRuleGroups"></div>
+</div>
+
+<div class="card">
   <h2>用于自动校验的核心常量</h2>
   <p class="hint">
     S44中有明确整数的规则已自动接入；未由本批信息覆盖的项目继续标为“待核对”。
@@ -645,6 +654,29 @@ async function refresh() {
         <b>${safe(entry.title)}</b>
         <span class="pill ${entry.machineActive ? 'on' : 'off'}">${safe(entry.statusLabel)}</span>
         <p>${safe(entry.summary)}</p>
+        ${entry.note ? `<p class="warn">注意：${safe(entry.note)}</p>` : ''}
+      </div>`).join('')}
+    </details>`).join('');
+
+  const economy = STATUS.economyRules || {entries:[]};
+  $('economyBadge').textContent = economy.official === false ? '非官方实测' : '来源未知';
+  $('economySummary').textContent = economy.entries ?
+    `已收录 ${economy.entryCount} 条：${economy.calculableCount} 条完整参考公式可估算，` +
+    `${economy.conflictCount} 条冲突已隔离；所有条目都禁止作为硬性校验。` : '没有经济机制资料。';
+  const conflicts = (economy.entries || []).filter(entry => entry.status === 'conflict');
+  $('economyConflicts').innerHTML = conflicts.length ? `
+    <div class="msg warn" style="display:block"><b>发现 ${conflicts.length} 处冲突，现有用户确认规则优先：</b>\n` +
+      conflicts.map(entry => `• ${safe(entry.title)}：${safe(entry.note)}`).join('\n') + '</div>' : '';
+  const economyGrouped = {};
+  for (const entry of economy.entries || []) (economyGrouped[entry.category] ||= []).push(entry);
+  $('economyRuleGroups').innerHTML = Object.entries(economyGrouped).map(([category, entries]) => `
+    <details class="season-group">
+      <summary>${safe(category)}（${entries.length}条）</summary>
+      ${entries.map(entry => `<div class="season-rule">
+        <b>${safe(entry.title)}</b>
+        <span class="pill ${entry.estimateAllowed ? 'on' : entry.status === 'conflict' ? 'off' : ''}">${safe(entry.statusLabel)}</span>
+        <p>${safe(entry.summary)}</p>
+        <p>来源页：${(entry.sourcePages || []).join('、') || '—'}；硬性校验：禁止</p>
         ${entry.note ? `<p class="warn">注意：${safe(entry.note)}</p>` : ''}
       </div>`).join('')}
     </details>`).join('');

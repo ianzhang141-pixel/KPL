@@ -22,8 +22,9 @@ import json
 import sys
 from pathlib import Path
 
-from . import (__version__, annotate, check, evaluate, hud, minimap, ocr, paths,
-               rules, schema, sources, state as state_mod, store, video)
+from . import (__version__, annotate, check, economy_s44, evaluate, hud, minimap,
+               ocr, paths, rules, schema, sources, state as state_mod, store,
+               video)
 
 
 def cmd_where(args: argparse.Namespace) -> int:
@@ -91,6 +92,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print("    核对办法：python3 -m kplab rules --set <名字>=<值>")
     else:
         print("✅ 游戏常量已全部核对。")
+
+    economy = economy_s44.payload()
+    print(f"经济机制参考库：{economy['entryCount']}条，其中"
+          f"{economy['calculableCount']}条参考公式可估算、"
+          f"{economy['conflictCount']}条与现有规则冲突并已隔离。")
+    print("    来源为非官方实测文档，不用于硬性合法性校验或训练真值。")
 
     print()
     profiles = hud.load_profiles(data_dir)

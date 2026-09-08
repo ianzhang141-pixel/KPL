@@ -19,9 +19,9 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import (__version__, annotate, check, evaluate, hud, minimap, ocr, paths,
-               rules, samples, schema, season_s44, sources, state as state_mod,
-               store, video)
+from . import (__version__, annotate, check, economy_s44, evaluate, hud, minimap,
+               ocr, paths, rules, samples, schema, season_s44, sources,
+               state as state_mod, store, video)
 
 WEB_DIR = Path(__file__).parent / "web"
 MAX_BODY = 4 * 1024 * 1024
@@ -121,6 +121,7 @@ def api_status() -> dict[str, Any]:
         "minimap": minimap.load_thresholds(data_dir),
         "sampleTypes": samples.public_types(),
         "seasonRules": season_s44.payload(),
+        "economyRules": economy_s44.payload(),
     }
 
 
