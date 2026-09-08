@@ -33,17 +33,26 @@ from typing import Any, Iterable
 # ---------------------------------------------------------------- 来源
 
 SOURCE_MANUAL = "manual"    # 人工在标注页上填的，最可信
-SOURCE_OCR = "ocr"          # 机器从画面识别的，可能错
+SOURCE_OCR = "ocr"          # 机器从记分板上读文字，可能错
+SOURCE_CV = "cv"            # 机器从小地图上找彩色标记，比 OCR 更不可靠
 SOURCE_CARRIED = "carried"  # 上一帧沿用下来的（这一帧没读到，但值不该凭空消失）
 SOURCE_DERIVED = "derived"  # 由其他字段算出来的（例如经济差）
 SOURCE_UNKNOWN = "unknown"  # 不知道，值必须是 None
 
-SOURCES = (SOURCE_MANUAL, SOURCE_OCR, SOURCE_CARRIED, SOURCE_DERIVED, SOURCE_UNKNOWN)
+SOURCES = (SOURCE_MANUAL, SOURCE_OCR, SOURCE_CV,
+           SOURCE_CARRIED, SOURCE_DERIVED, SOURCE_UNKNOWN)
+
+# 机器读出来的字段，来源要分 ocr 和 cv 两种而不是笼统一个「机器」：
+# 记分板 OCR 错了通常是数字认错（8 读成 9），小地图 CV 错了通常是
+# 「哪个点是几号位」认错 —— 两类错误的排查方式完全不同，
+# 混成一个来源会让以后查问题的人无从下手。
+MACHINE_SOURCES = (SOURCE_OCR, SOURCE_CV)
 
 # 各来源的默认置信度。manual 也不给 1.0 —— 人也会看错、也会填错行。
 DEFAULT_CONFIDENCE = {
     SOURCE_MANUAL: 0.98,
     SOURCE_OCR: 0.5,
+    SOURCE_CV: 0.3,        # 比 OCR 低：位置可能对，但「这是几号位」基本是猜的
     SOURCE_CARRIED: 0.4,
     SOURCE_DERIVED: 0.0,   # 由参与计算的字段里最低的那个决定，见 derive()
     SOURCE_UNKNOWN: 0.0,

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import (__version__, annotate, check, evaluate, hud, ocr, paths,
+from . import (__version__, annotate, check, evaluate, hud, minimap, ocr, paths,
                rules, schema, state as state_mod, store, video)
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -113,6 +113,7 @@ def api_status() -> dict[str, Any]:
             for name, profile in hud.load_profiles(data_dir).items()
         },
         "minimapNote": ocr.minimap_note(),
+        "minimap": minimap.load_thresholds(data_dir),
     }
 
 
@@ -191,6 +192,59 @@ def api_save_profile(body: dict[str, Any]) -> dict[str, Any]:
     hud.save_profile(paths.ensure(_console().data_dir), name, profile)
     saved = hud.get_profile(_console().data_dir, name)
     return {"ok": True, "profile": saved, "verdict": hud.describe(saved)}
+
+
+def _frame_file(data_dir: Path, game_id: str, name: str) -> Path:
+    """把 (比赛, 文件名) 解析成真实路径，挡住 ../。"""
+    if not store.valid_game_id(game_id):
+        raise ValueError("比赛编号不合法。")
+    base = store.frames_dir(data_dir, game_id).resolve()
+    target = (base / name).resolve()
+    if not str(target).startswith(str(base) + "/") or not target.is_file():
+        raise ValueError("没有这张帧图。")
+    return target
+
+
+def api_minimap_detect(body: dict[str, Any]) -> dict[str, Any]:
+    """在标定页上实时试一次小地图识别。"""
+    data_dir = _console().data_dir
+    try:
+        image = _frame_file(data_dir, str(body.get("gameId") or ""),
+                            str(body.get("file") or ""))
+    except ValueError as err:
+        return {"ok": False, "error": str(err)}
+
+    box = body.get("box")
+    if not hud.valid_box(box):
+        return {"ok": False, "error": "小地图区域坐标不合法，必须是 0~1 的相对值。"}
+
+    thresholds = minimap.load_thresholds(data_dir)
+    for key in ("blueMinB", "blueBOverR", "blueBOverG",
+                "redMinR", "redROverB", "redROverG",
+                "minBlobPixels", "maxBlobPixels"):
+        if body.get(key) is not None:
+            try:
+                thresholds[key] = int(body[key])
+            except (TypeError, ValueError):
+                return {"ok": False, "error": f"{key} 必须是整数。"}
+
+    try:
+        result = minimap.detect(image, tuple(box), thresholds)
+    except Exception as err:      # noqa: BLE001 - 标定页要看见失败原因
+        return {"ok": False, "error": f"{type(err).__name__}: {err}"}
+    return {"ok": True, "result": result, "thresholds": thresholds}
+
+
+def api_minimap_save(body: dict[str, Any]) -> dict[str, Any]:
+    data_dir = paths.ensure(_console().data_dir)
+    values = {k: v for k, v in (body.get("thresholds") or {}).items()
+              if k != "verified"}
+    try:
+        path = minimap.save_thresholds(data_dir, values, verified=bool(body.get("verified")))
+    except (TypeError, ValueError) as err:
+        return {"ok": False, "error": str(err)}
+    return {"ok": True, "path": str(path),
+            "thresholds": minimap.load_thresholds(data_dir)}
 
 
 def api_build_state(body: dict[str, Any]) -> dict[str, Any]:
@@ -322,6 +376,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_file(WEB_DIR / "console.html")
             elif path == "/annotate":
                 self._send_file(WEB_DIR / "annotate.html")
+            elif path == "/calibrate":
+                self._send_file(WEB_DIR / "calibrate.html")
             elif path == "/debug":
                 self._send_file(WEB_DIR / "debug.html")
             elif path == "/api/status":
@@ -360,6 +416,8 @@ class Handler(BaseHTTPRequestHandler):
             "/api/profile": api_save_profile,
             "/api/state/build": api_build_state,
             "/api/extract": api_extract,
+            "/api/minimap/detect": api_minimap_detect,
+            "/api/minimap/save": api_minimap_save,
         }
         handler = routes.get(path)
         if not handler:

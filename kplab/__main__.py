@@ -12,6 +12,7 @@
     python3 -m kplab state <比赛编号>            观测 → 分钟级 State
     python3 -m kplab evaluate <比赛编号>         人工标注 vs 机器识别，看识别准不准
     python3 -m kplab rules                      查看 / 核对游戏常量
+    python3 -m kplab minimap <帧图>              小地图找人（认位置，不认英雄）
 """
 
 from __future__ import annotations
@@ -21,8 +22,8 @@ import json
 import sys
 from pathlib import Path
 
-from . import (__version__, annotate, check, evaluate, hud, ocr, paths, rules,
-               schema, state as state_mod, store, video)
+from . import (__version__, annotate, check, evaluate, hud, minimap, ocr, paths,
+               rules, schema, state as state_mod, store, video)
 
 
 def cmd_where(args: argparse.Namespace) -> int:
@@ -282,6 +283,56 @@ def cmd_rules(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_minimap(args: argparse.Namespace) -> int:
+    data_dir = paths.find_data_dir(args.data)
+    image = Path(args.image).expanduser()
+    thresholds = minimap.load_thresholds(data_dir)
+
+    box = None
+    if args.box:
+        try:
+            parts = [float(v) for v in args.box.split(",")]
+        except ValueError:
+            print("❌ --box 要写成四个数字，例如 0,0.66,0.185,0.33")
+            return 2
+        if len(parts) != 4:
+            print("❌ --box 需要正好四个数字：x,y,宽,高（都是 0~1 的相对值）")
+            return 2
+        box = (parts[0], parts[1], parts[2], parts[3])
+    else:
+        profile = hud.get_profile(data_dir, args.profile)
+        region = (profile or {}).get("regions", {}).get("minimap")
+        if not region:
+            print(f"❌ 标定档案「{args.profile}」里没有小地图区域，也没给 --box。")
+            print("   用 --box 手动指定，例如：--box 0,0.66,0.185,0.33")
+            return 2
+        box = tuple(region)
+
+    try:
+        result = minimap.detect(image, box, thresholds)
+    except Exception as err:      # noqa: BLE001 - 要让用户看见原因
+        print(f"❌ {type(err).__name__}: {err}")
+        return 2
+
+    print(f"图片：{image}")
+    print(f"小地图区域：{box}")
+    print()
+    print(minimap.summary(result))
+
+    if args.calibrate:
+        if not result["quality"]["usable"]:
+            print()
+            print("❌ 这次识别本身就不可用，不能拿它当标定结果。")
+            print("   先调 --box 或阈值，等识别结果合理了再 --calibrate。")
+            return 1
+        path = minimap.save_thresholds(data_dir, thresholds, verified=True)
+        print()
+        print(f"✅ 已把当前阈值标记为「已标定」：{path}")
+        print("   注意：这只表示你确认过这一帧的识别结果合理，")
+        print("   换一个录像源（画质、色调不同）可能要重新标定。")
+    return 0 if result["quality"]["usable"] else 1
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     from . import server
     server.serve(paths.find_data_dir(args.data), port=args.port)
@@ -340,6 +391,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--set", help="记录一条核对结果，例如 towersPerLane=2")
     p.add_argument("--by", help="谁核对的")
     p.set_defaults(func=cmd_rules)
+
+    p = sub.add_parser("minimap", help="小地图找人：认出有几个蓝/红标记、各在哪")
+    p.add_argument("image", help="一张画面（抽出来的帧图）")
+    p.add_argument("--box", help="小地图区域 x,y,宽,高（0~1 相对值）。不写就用标定档案里的")
+    p.add_argument("--profile", default="kpl_broadcast", help="用哪个 HUD 标定档案")
+    p.add_argument("--calibrate", action="store_true",
+                   help="识别结果合理的话，把当前阈值标记为已标定")
+    p.set_defaults(func=cmd_minimap)
 
     p = sub.add_parser("serve", help="打开网页控制台（推荐）")
     p.add_argument("--port", type=int, default=8020,
