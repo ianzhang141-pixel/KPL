@@ -45,7 +45,7 @@
   .dot { position:absolute; min-width:18px; height:18px; padding:0 3px; border-radius:9px;
          transform:translate(-50%,-50%); border:2px solid #0f1216; pointer-events:none;
          color:#fff; font:bold 10px/14px system-ui; text-align:center; }
-  .rlist { max-height:250px; overflow:auto; }
+  .rlist { max-height:320px; overflow:auto; }
   .ritem { display:flex; justify-content:space-between; align-items:center; gap:8px;
            padding:6px 8px; border-bottom:1px solid #1c212a; font-size:12px; cursor:pointer; }
   .ritem:hover { background:#1b2029; }
@@ -92,6 +92,12 @@
   .chip.hid { opacity:.5; }
   .chip .eye { border:0; border-left:1px solid #2f3644; border-radius:0; padding:0 7px; }
 
+  /* 地标涨到 52 个之后，从下面挑一个框要滚很远，画面会滚出屏幕。
+     宽屏时把左边这一列钉住，随时看得见自己要框哪儿。 */
+  @media (min-width:1001px){ .sticky-col { position:sticky; top:12px; } }
+  .ver { color:#5b6373; font-size:11px; border:1px solid #232935; border-radius:99px;
+         padding:1px 8px; margin-left:6px; }
+
   .fields { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
   @media (max-width:520px){ .fields{grid-template-columns:1fr 1fr;} }
   .fields .f label { font-size:11px; }
@@ -103,10 +109,12 @@
 </style>
 
 <h1>标定 · 告诉系统「数字在画面的哪个位置」</h1>
-<p class="sub"><a href="/">← 控制台</a> · <a href="/annotate">标注页</a> · <a href="/debug">核对页</a></p>
+<p class="sub"><a href="/">← 控制台</a> · <a href="/annotate">标注页</a> · <a href="/debug">核对页</a>
+  <span class="ver" id="ver">版本读取中…</span>
+  <span class="ver" id="planSize"></span></p>
 
 <div class="wrap">
-  <div>
+  <div class="sticky-col">
     <div class="card">
       <div class="row">
         <div style="flex:2"><label>比赛</label><select id="gameSel"></select></div>
@@ -144,6 +152,12 @@
   <div>
     <div class="card">
       <h2>① 要标定的项目</h2>
+      <p class="tip" style="margin-top:0">
+带「播报·」的四项是<b>屏幕正上方那条播报横幅</b>里的分区：
+谁击败的、被击败/被摧毁的是谁、是哪种龙、助攻是谁。
+先框「播报总范围」（整条横幅），再在横幅内部把四块分别框出来。
+播报现在只是<b>辅助验证</b>，读不到不会挡住推塔和打龙的判断。
+      </p>
       <div class="rlist" id="regions"></div>
       <div class="row" style="margin-top:10px">
         <div style="flex:0"><button onclick="saveProfile()">保存标定</button></div>
@@ -153,7 +167,8 @@
     </div>
 
     <div class="card" style="margin-top:14px">
-      <h2>② 地标：塔 / 资源坑 / 头像 / 技能 <span class="pill" id="lmPill">未标定</span></h2>
+      <h2>② 地标：塔 / 资源坑 / 头像 / 大招 / 技能
+        <span class="pill" id="lmPill">未标定</span></h2>
       <p class="tip" style="margin-top:0">
 推塔使用<b>固定地标状态机</b>：一次变化先当遮挡，连续缺失才生成候选，
 随后在时间窗口内高帧率回溯，并用播报等第二信号校验。比赛时间前 10 秒不判断。
@@ -161,6 +176,17 @@
 <b>点下面任意一个方块</b>就开始标它，再到画面上把那个图标<b>框小一点、贴紧图标</b>。
 框太大会把周围的地图背景一起框进去，图标消失也测不出变化。
 方块右边的 👁 是<b>只隐藏这个框，不删数据</b>；要删数据请用下面的「删掉当前地标」。
+
+一共六组，每组标题左边的 ▾ 可以把这一组<b>收起来</b>（只是列表折叠，不影响任何数据）：
+<b>防御塔 18 个</b>（每方三路各 1 塔 / 2 塔 / 高地塔）·
+<b>常规资源坑 2 个</b>（暴君坑、主宰坑）·
+<b>风暴龙王候选坑 2 个</b> ·
+<b>英雄头像 10 个</b> · <b>大招状态 10 个</b>（头像角上那个绿点）·
+<b>召唤师技能 10 个</b>（头像旁边那个技能图标）。
+
+<b>风暴龙王为什么要框两个：</b>它 20 分钟后<b>只会在上下两个龙坑之一</b>出现，
+事先无法确定是哪个，所以两个都得有框。位置和暴君坑/主宰坑基本重合 ——
+先把那两个框好，再点那一组标题上的「照抄暴君坑/主宰坑的框」，不用重拖。
       </p>
       <div class="tools">
         <button class="tiny" onclick="showAllLm()">显示全部地标框</button>
@@ -353,7 +379,8 @@ function renderLm(){
   $('lmGroups').innerHTML = LM_GROUPS.map(([kind,title])=>{
     const items = LM_PLAN.filter(l=>l.kind===kind);
     const got = items.filter(l=>LANDMARKS[l.name]).length;
-    const chips = items.map(l=>{
+    const open = !COLLAPSED.has(kind);
+    const chips = !open ? '' : items.map(l=>{
       const key = lKey(l.name);
       const has = !!LANDMARKS[l.name];
       const cls = ['chip', has?'done':'', l.name===LM_ACTIVE?'on':'', isHidden(key)?'hid':''];
@@ -361,19 +388,66 @@ function renderLm(){
         <button class="pick" onclick="pickLm('${l.name}')">${has?'✓':'○'} ${esc(l.label)}</button>
         ${eyeBtn(key)}</span>`;
     }).join('');
+    // 风暴龙王和暴君/主宰用的是同两个坑，位置基本重合。
+    // 让人对着同一处再精确拖两次没有意义，给一个照抄按钮。
+    const extra = kind==='storm_objective'
+      ? `<button class="tiny" onclick="copyPitBoxes()">照抄暴君坑/主宰坑的框</button>` : '';
     return `<div class="lmgroup">
-      <div class="lmhead"><span class="name">${title}</span>
+      <div class="lmhead">
+        <button class="tiny" onclick="toggleGroup('${kind}')">${open?'▾':'▸'}</button>
+        <span class="name">${title}</span>
         <span>已标 ${got}/${items.length}</span>
         <button class="tiny" onclick="setGroupHidden('${kind}',true)">隐藏这组</button>
-        <button class="tiny" onclick="setGroupHidden('${kind}',false)">显示这组</button></div>
+        <button class="tiny" onclick="setGroupHidden('${kind}',false)">显示这组</button>
+        ${extra}</div>
       <div class="chips">${chips}</div></div>`;
   }).join('');
   updateNow(); updateHiddenCount(); drawOverlay();
 }
+
+// 分组折叠。52 个方块全摊开的时候，光是滚到「召唤师技能」就要翻半屏。
+// 折叠只影响列表长短，和「隐藏框」是两回事，也不动任何坐标。
+const COLLAPSE_KEY = 'kplab.calibrate.collapsed';
+let COLLAPSED = new Set();
+function loadCollapsed(){
+  try { const raw = localStorage.getItem(COLLAPSE_KEY);
+        if(raw) COLLAPSED = new Set(JSON.parse(raw)); } catch(e) { COLLAPSED = new Set(); }
+}
+function toggleGroup(kind){
+  if(COLLAPSED.has(kind)) COLLAPSED.delete(kind); else COLLAPSED.add(kind);
+  try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...COLLAPSED])); } catch(e) {}
+  renderLm();
+}
+
+function copyPitBoxes(){
+  const pairs=[['tyrantPit','stormDragonLowerPit'],['overlordPit','stormDragonUpperPit']];
+  const copied=[];
+  for(const [from,to] of pairs){
+    if(LANDMARKS[from]){ LANDMARKS[to]={box:[...LANDMARKS[from].box]}; copied.push(to); }
+  }
+  if(!copied.length){
+    msg('lmMsg','先把「常规资源坑」里的暴君坑和主宰坑框好，这个按钮才有东西可抄。','err');
+    return;
+  }
+  COLLAPSED.delete('storm_objective');
+  msg('lmMsg', `已照抄 ${copied.length} 个框。风暴龙王 20 分钟后只会在两个龙坑之一出现，\n`+
+      `所以两个坑都要有框。位置如果有偏差可以再单独拖一次。记得点「保存地标」。`, 'warn');
+  renderLm();
+}
+
+// 列表长了以后，从下面挑一个地标时画面常常已经滚出屏幕 ——
+// 拖框之前先把画面挪回视野，只在它确实看不见时才滚。
+function focusStage(){
+  const img=$('img'); if(!img || !img.getAttribute('src')) return;
+  const r=img.getBoundingClientRect();
+  if(r.bottom < 80 || r.top > window.innerHeight - 80)
+    img.scrollIntoView({block:'center', behavior:'smooth'});
+}
+
 function pickLm(n){
   LM_ACTIVE=n; ACTIVE=null;
   setHidden(lKey(n), false); saveHidden();
-  renderRegions(); renderLm();
+  renderRegions(); renderLm(); focusStage();
 }
 function delLm(){
   if(!LM_ACTIVE || !LANDMARKS[LM_ACTIVE]){ msg('lmMsg','当前这个地标还没框过，没什么可删的。','err'); return; }
@@ -459,8 +533,12 @@ function fmt(s){ s=Math.max(0,Math.round(s));
 function msg(id,t,k='ok'){ const e=$(id); e.className='msg '+k; e.textContent=t; if(!t) e.className='msg'; }
 
 async function boot() {
-  loadHidden();
+  loadHidden(); loadCollapsed();
   const st = await api('/api/status');
+  // 用户已经三次因为没 git pull 而以为功能没做。版本号挂在标题下面，
+  // 一眼就能对上 CHANGELOG 里写的是哪一版。
+  $('ver').textContent = 'v' + (st.version || '?');
+  $('planSize').textContent = `${LM_PLAN.length} 个地标框 · ${currentList().length} 个项目框`;
   SPECS = st.regionSpecs || {};
   PROFILES = st.profiles || {};
   loadProfileForMode();
@@ -483,6 +561,7 @@ async function boot() {
 $('gameSel').addEventListener('change', ()=>{ GAME=$('gameSel').value; loadFrames(); });
 $('profileMode').addEventListener('change', ()=>{
   ACTIVE=null; LAST=null; loadProfileForMode(); renderRegions(); renderLm();
+  $('planSize').textContent = `${LM_PLAN.length} 个地标框 · ${currentList().length} 个项目框`;
 });
 
 function profileName(){ return $('profileMode').value==='player_pov' ? 'player_pov' : 'kpl_broadcast'; }
@@ -534,7 +613,7 @@ function renderRegions() {
 function pickRegion(k){
   ACTIVE=k; LM_ACTIVE=null;
   setHidden(rKey(k), false); saveHidden();
-  renderRegions(); renderLm();
+  renderRegions(); renderLm(); focusStage();
 }
 function clearOne(){ if(ACTIVE){ delete REGIONS[ACTIVE]; renderRegions(); } }
 

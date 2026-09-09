@@ -20,11 +20,16 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
-from kplab import events_cv, minimap
+from kplab import events_cv, hud, minimap
 
 PAGE = Path(__file__).resolve().parents[1] / "kplab" / "web" / "calibrate.html"
 HTML = PAGE.read_text(encoding="utf-8")
@@ -57,10 +62,25 @@ class TestLandmarksAreClickable(unittest.TestCase):
         self.assertRegex(HTML, r"function pickLm\([^)]*\)\{\s*\n?\s*LM_ACTIVE=n; ACTIVE=null;")
         self.assertRegex(HTML, r"function pickRegion\([^)]*\)\{\s*\n?\s*ACTIVE=k; LM_ACTIVE=null;")
 
-    def test_all_three_landmark_kinds_are_grouped_on_the_page(self):
-        for kind in (events_cv.KIND_TOWER, events_cv.KIND_OBJECTIVE, events_cv.KIND_PORTRAIT):
+    def test_every_backend_kind_is_grouped_on_the_page(self):
+        # 后端认哪几类，页面就必须给哪几类一个分组。
+        # 大招和召唤师技能加进 LANDMARK_KINDS 时，如果这里还写死三类，
+        # 后端等着的框在页面上根本没有入口 —— 用户只会看到「功能没做」。
+        for kind in events_cv.LANDMARK_KINDS:
             self.assertIn(f"['{kind}',", HTML,
                           f"地标分组少了 {kind} —— 这一类在页面上就没有入口了。")
+
+    def test_high_ground_towers_are_per_lane(self):
+        # 每方三路各一座高地塔，共 18 座。旧版每方只有一座 `${side}_hg`。
+        self.assertIn("`${side}_${lane}_hg`", HTML)
+        self.assertNotIn("`${side}_hg`", HTML,
+                         "高地塔又变回每方一座了 —— 应该是每路一座、共 6 座。")
+
+    def test_every_banner_region_has_a_row(self):
+        # 播报分区在 hud 里定义了，页面上却没有对应的行，就等于永远标不了。
+        for key in (k for k in hud.REGIONS if k.startswith("banner")):
+            self.assertIn(f"['{key}',", HTML,
+                          f"hud 里有 {key}，标定页却没有它的行。")
 
     def test_pits_match_the_backend(self):
         # 前端写死的坑名必须和 events_cv 认的一致，否则标了也检测不到。
@@ -79,7 +99,7 @@ class TestHidingIsNotDeleting(unittest.TestCase):
 
     def test_hide_helpers_never_delete_data(self):
         for name in ("toggleHidden", "hideAll", "showAll", "onlyCurrent",
-                     "hideAllLm", "showAllLm", "setGroupHidden"):
+                     "hideAllLm", "showAllLm", "setGroupHidden", "toggleGroup"):
             body = self._body(name)
             self.assertNotIn(
                 "delete ", body,
@@ -94,6 +114,14 @@ class TestHidingIsNotDeleting(unittest.TestCase):
         self.assertIn("isHidden(lKey(n))", body)
         # 仍然遍历完整的数据，只是跳过不画 —— 数据没有被过滤掉。
         self.assertIn("Object.entries(LANDMARKS)", body)
+
+    def test_copying_pit_boxes_maps_the_right_pits(self):
+        # 上路河道对上路龙坑、下路河道对下路龙坑。抄反了，风暴龙王会被记在另一个坑上。
+        body = self._body("copyPitBoxes")
+        self.assertIn("['tyrantPit','stormDragonLowerPit']", body)
+        self.assertIn("['overlordPit','stormDragonUpperPit']", body)
+        # 抄的是副本，不是同一个数组 —— 否则改一个框另一个跟着变。
+        self.assertIn("[...LANDMARKS[from].box]", body)
 
     def test_picking_a_hidden_target_unhides_it(self):
         # 否则用户选中一个被隐藏的地标，拖了框却什么都看不见，会以为坏了。
@@ -145,6 +173,89 @@ class TestStatusExposesDefaults(unittest.TestCase):
         first = minimap.default_thresholds()
         first["blueMinB"] = 999
         self.assertNotEqual(minimap.default_thresholds()["blueMinB"], 999)
+
+
+class TestLandmarkPlanExecutes(unittest.TestCase):
+    """把页面里的 landmarkPlan() 真跑一遍，别只做字符串匹配。
+
+    字符串匹配挡得住「分组没了」，挡不住「分组在、但循环少生成了一半方块」。
+    node 不是本项目的依赖，机器上没有就跳过 —— 有的时候多一层保障。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if shutil.which("node") is None:
+            raise unittest.SkipTest("没有 node，跳过（本项目不依赖 node）")
+        plan = re.search(r"function landmarkPlan\(\)\{.*?\n\}", HTML, re.S)
+        groups = re.search(r"const LM_GROUPS = \[.*?\];", HTML, re.S)
+        full = re.search(r"const FULL_LIST = \[.*?\n\];", HTML, re.S)
+        pov = re.search(r"const POV_LIST = \[.*?\n\];", HTML, re.S)
+        assert plan and groups and full and pov, "页面的写法变了，测试要跟着改"
+        script = ("\n".join(m.group(0) for m in (plan, groups, full, pov)) +
+                  "\nconsole.log(JSON.stringify({plan:landmarkPlan(),"
+                  "groups:LM_GROUPS.map(g=>g[0]),"
+                  "full:FULL_LIST.map(r=>r[0]), pov:POV_LIST.map(r=>r[0])}));")
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
+                                         encoding="utf-8") as handle:
+            handle.write(script)
+            path = handle.name
+        try:
+            out = subprocess.run(["node", path], capture_output=True, text=True, timeout=30)
+        finally:
+            os.unlink(path)
+        assert out.returncode == 0, out.stderr
+        payload = json.loads(out.stdout)
+        cls.plan = payload["plan"]
+        cls.groups = payload["groups"]
+        cls.region_lists = {"赛事转播": payload["full"], "单人视角": payload["pov"]}
+
+    def test_counts(self):
+        counts: dict[str, int] = {}
+        for item in self.plan:
+            counts[item["kind"]] = counts.get(item["kind"], 0) + 1
+        self.assertEqual(counts, {
+            "tower": 18,         # 每方三路 × (1塔 + 2塔 + 高地塔)
+            "objective": 2,      # 暴君坑 + 主宰坑
+            "storm_objective": 2,  # 风暴龙王只会在两个龙坑之一出现，两个都要框
+            "portrait": 10,
+            "ultimate": 10,
+            "summoner": 10,
+        })
+
+    def test_names_are_unique(self):
+        names = [item["name"] for item in self.plan]
+        self.assertEqual(len(names), len(set(names)),
+                         "地标名重复了，后一个会把前一个的框覆盖掉。")
+
+    def test_every_planned_kind_has_a_group_and_vice_versa(self):
+        # 计划里有、分组里没有 → 那些方块根本渲染不出来。
+        # 分组里有、计划里没有 → 页面上会出现一个永远空着的分组。
+        self.assertEqual(sorted({item["kind"] for item in self.plan}), sorted(self.groups))
+
+    def test_plan_kinds_are_all_accepted_by_the_backend(self):
+        # save_landmarks() 会静默丢掉 kind 不认识的项 ——
+        # 用户框了、点了保存、也显示成功，实际上什么都没存。
+        for kind in {item["kind"] for item in self.plan}:
+            self.assertIn(kind, events_cv.LANDMARK_KINDS,
+                          f"页面会生成 {kind} 类地标，后端却会把它丢掉。")
+
+    def test_every_banner_region_is_in_every_profile_list(self):
+        # 播报分区要在**两种画面类型**里都能标。只在其中一张清单里出现，
+        # 换个画面类型就永远标不上，而字符串搜索还是搜得到它。
+        banner = [k for k in hud.REGIONS if k.startswith("banner")]
+        for label, keys in self.region_lists.items():
+            for key in banner:
+                self.assertIn(key, keys, f"「{label}」这张清单里没有 {key}。")
+
+    def test_both_profile_lists_keep_the_anchors(self):
+        for label, keys in self.region_lists.items():
+            self.assertIn("clock", keys, f"「{label}」少了比赛计时 —— 整条时间轴的锚点。")
+            self.assertIn("minimap", keys, f"「{label}」少了小地图。")
+
+    def test_all_backend_pits_are_in_the_plan(self):
+        names = {item["name"] for item in self.plan}
+        for pit in events_cv.OBJECTIVE_PITS:
+            self.assertIn(pit, names, f"后端在找 {pit}，页面上没有它的方块。")
 
 
 if __name__ == "__main__":
