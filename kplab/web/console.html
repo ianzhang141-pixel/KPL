@@ -72,6 +72,15 @@
   .video-preview { display:none; width:100%; max-height:420px; margin:12px 0;
                    background:#000; border-radius:8px; }
   progress { width:100%; height:14px; margin-top:10px; accent-color:#3b82f6; }
+  .job-progress { display:none; margin-top:12px; padding:12px 14px; border-radius:8px;
+                  border:1px solid #2f4f7c; background:#101a29; }
+  .job-progress-head { display:flex; justify-content:space-between; gap:12px;
+                       align-items:baseline; }
+  .job-progress-head strong { color:#dbeafe; font-size:13px; }
+  .job-progress-head span { color:#93c5fd; font-size:13px; font-weight:600; }
+  .job-progress-detail { color:#aab4c4; font-size:12px; margin-top:5px;
+                         overflow-wrap:anywhere; }
+  .job-progress-fresh { color:#718096; font-size:11px; margin-top:3px; }
   details { margin-top:12px; }
   summary { cursor:pointer; color:#8b93a1; }
   .queue { margin-top:12px; }
@@ -198,6 +207,15 @@
     <tbody id="sourceRows"></tbody>
   </table>
   <div id="sourceBatchSummary"></div>
+  <div class="job-progress" id="sourceProgressPanel">
+    <div class="job-progress-head">
+      <strong id="sourceProgressStage">等待任务开始</strong>
+      <span id="sourceProgressPercent">0%</span>
+    </div>
+    <progress id="sourceProgress" value="0" max="100"></progress>
+    <div class="job-progress-detail" id="sourceProgressDetail"></div>
+    <div class="job-progress-fresh" id="sourceProgressFresh"></div>
+  </div>
   <pre class="log" id="sourceJobLog" style="display:none"></pre>
 </div>
 
@@ -328,6 +346,69 @@ function bytes(n) {
 function clock(sec) {
   sec = Math.max(0, Math.round(sec));
   return Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0');
+}
+
+function durationText(sec) {
+  sec = Math.max(0, Math.round(Number(sec) || 0));
+  const hours = Math.floor(sec / 3600);
+  const minutes = Math.floor((sec % 3600) / 60);
+  const seconds = sec % 60;
+  return hours ? `${hours}小时${minutes}分` : minutes ? `${minutes}分${seconds}秒` : `${seconds}秒`;
+}
+
+function inferredSourceStage(job) {
+  if (job.error) return '处理失败';
+  if (!job.running && job.finished) return '全部处理完成';
+  const lines = job.lines || [];
+  const last = lines.length ? lines[lines.length - 1] : '';
+  if (last.includes('开始流式分析')) return '正在流式抽帧';
+  if (last.includes('解析来源') || last.includes('恢复来源')) return '正在解析录像地址';
+  return job.running ? '正在处理' : '等待任务开始';
+}
+
+function renderSourceProgress(job) {
+  const sourceBatches = (STATUS && STATUS.sourceBatches) || [];
+  const persistedActive = sourceBatches.map(batch => batch.active).find(Boolean) || null;
+  const isSourceJob = /录像|来源|source/i.test(job.title || '') || Boolean(persistedActive);
+  if (!isSourceJob && !sourceBatches.some(batch => batch.pending || batch.running)) return;
+  const panel = $('sourceProgressPanel');
+  panel.style.display = 'block';
+  const total = Math.max(0, Number(job.total) || 0);
+  const done = Math.max(0, Number(job.done) || 0);
+  const percent = total ? Math.min(100, Math.max(0, done / total * 100)) : 0;
+  $('sourceProgress').value = percent;
+  $('sourceProgressPercent').textContent = percent >= 99.95 ? '100%' : `${percent.toFixed(1)}%`;
+
+  const currentItem = Number(job.currentItem) || (total ? Math.min(total, Math.floor(done) + 1) : 0);
+  const stage = job.stageLabel || inferredSourceStage(job);
+  $('sourceProgressStage').textContent = currentItem && total
+    ? `${stage} · 第 ${currentItem}/${total} 场` : stage;
+
+  const active = persistedActive || {};
+  const title = job.currentItemTitle || active.title || '';
+  const currentVideoTime = Number(job.currentVideoTime ?? active.currentVideoTime);
+  const videoDuration = Number(job.currentVideoDuration);
+  const framesDone = Number(job.framesDone);
+  const framesTotal = Number(job.framesTotal);
+  const speed = Number(job.processingSpeed);
+  const eta = Number(job.itemEtaSec);
+  const details = [];
+  if (title) details.push(title);
+  if (Number.isFinite(currentVideoTime) && currentVideoTime > 0) {
+    details.push(videoDuration > 0 ? `录像位置 ${clock(currentVideoTime)} / ${clock(videoDuration)}`
+      : `已处理到录像 ${clock(currentVideoTime)}`);
+  }
+  if (framesTotal > 0) details.push(`证据帧 ${framesDone}/${framesTotal}`);
+  if (speed > 0) details.push(`速度 ${speed.toFixed(2)}×实时`);
+  if (eta > 0) details.push(`本场预计还需 ${durationText(eta)}`);
+  const remainingItems = Math.max(0, total - currentItem);
+  const batchEta = speed > 0 && videoDuration > 0
+    ? eta + remainingItems * videoDuration / speed : 0;
+  if (batchEta > eta + 60) details.push(`整批约还需 ${durationText(batchEta)}`);
+  if (!job.stageLabel && job.running) details.push('数字持续变化即为正常处理');
+  if (job.error) details.push(job.error);
+  $('sourceProgressDetail').textContent = details.join(' · ');
+  $('sourceProgressFresh').textContent = job.updatedAt ? `最近更新 ${job.updatedAt}` : '';
 }
 
 function safe(text) {
@@ -653,7 +734,7 @@ async function refresh() {
     <tbody>${sourceBatches.map(batch => `<tr>
       <td><code>${safe(batch.batchId)}</code></td><td>${batch.pending}</td><td>${batch.running}</td>
       <td class="status-done">${batch.done}</td><td class="${batch.scoutDone ? 'status-running' : ''}">${batch.scoutDone || 0}</td><td class="${batch.failed ? 'status-error' : ''}">${batch.failed}</td>
-      <td>${batch.pending || batch.running ? `<button onclick="resumeSourceBatch('${safe(batch.batchId)}')">继续</button>` :
+      <td>${batch.running ? '<span class="status-running">处理中</span>' : batch.pending ? `<button onclick="resumeSourceBatch('${safe(batch.batchId)}')">继续</button>` :
         batch.failed ? `<button onclick="resumeSourceBatch('${safe(batch.batchId)}',true)">重试失败项</button>` : '已完成'}</td>
     </tr>`).join('')}</tbody></table>` : '';
   const sourceActive = sourceBatches.some(batch => batch.pending || batch.running);
@@ -857,6 +938,7 @@ async function pollJob() {
   $('sourceJobLog').textContent = text;
   $('jobLog').scrollTop = $('jobLog').scrollHeight;
   $('sourceJobLog').scrollTop = $('sourceJobLog').scrollHeight;
+  renderSourceProgress(job);
   if (!job.running && job.finished) {
     clearInterval(jobTimer); jobTimer = null;
     $('sourceStartButton').disabled = false;

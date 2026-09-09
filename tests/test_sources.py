@@ -117,6 +117,22 @@ class SourcePersistence(unittest.TestCase):
             summary = sources.list_batches(data_dir)[0]
             self.assertEqual((summary["pending"], summary["done"], summary["failed"]),
                              (1, 1, 1))
+            self.assertIsNone(summary["active"])
+
+    def test_batch_summary_exposes_safe_active_progress(self):
+        with tempfile.TemporaryDirectory() as raw:
+            data_dir = Path(raw)
+            sources.save_batch(data_dir, {"batchId": "SOURCE_ACTIVE", "jobs": [{
+                "gameId": "G1", "title": "第一场", "status": "RUNNING",
+                "stage": "STREAMING", "progress": 0.25,
+                "currentVideoTime": 123, "updatedAt": "now",
+                "originUrl": "https://secret.example/video.m3u8?token=secret",
+            }]})
+            active = sources.list_batches(data_dir)[0]["active"]
+            self.assertEqual(active["progress"], 0.25)
+            self.assertEqual(active["currentVideoTime"], 123)
+            self.assertNotIn("originUrl", active)
+            self.assertNotIn("secret", repr(active))
 
     def test_cache_has_age_and_size_limits(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -202,6 +218,58 @@ class SourceApi(unittest.TestCase):
         meta = store.load_meta(self.data_dir, result["created"][0]["gameId"])
         self.assertFalse(meta["sourceUrlStored"])
         self.assertEqual(meta["videoImportMode"], "remote-stream-no-full-copy")
+
+    def test_processing_prefers_720p_analysis_stream(self):
+        game_id = "ANALYSIS_STREAM_001"
+        store.create_game(self.data_dir, game_id, {"title": "高清录像"})
+        batch = {"batchId": "SOURCE_ANALYSIS", "jobs": [{
+            "gameId": game_id, "originUrl": "https://example.com/game",
+            "title": "高清录像", "status": "PENDING", "stage": "QUEUED",
+        }]}
+        resolved = sources.ResolvedVideoSource(
+            platform="direct", sourceType="HTTP_VIDEO", originUrl="https://example.com/game",
+            sourceUrl="https://cdn.example/1440.m3u8",
+            analysisSourceUrl="https://cdn.example/720.m3u8", title="高清录像",
+            resolvedAt="2026-09-09T00:00:00+1000",
+        )
+        with patch.object(sources, "resolve", return_value=[resolved]), \
+                patch.object(video, "probe_input", return_value=video.VideoInfo(
+                    resolved.analysisSourceUrl, 10, 1280, 720, 60)) as probe, \
+                patch.object(video, "stream_extract_frames", return_value=[
+                    {"index": 0, "atSec": 0, "file": "stream.jpg"}]) as extract:
+            server._source_batches_work(self.data_dir, [batch])(lambda _message: None)
+        self.assertEqual(probe.call_args.args[0], resolved.analysisSourceUrl)
+        self.assertEqual(extract.call_args.args[0], resolved.analysisSourceUrl)
+
+    def test_resumed_progress_includes_already_finished_games(self):
+        batch = {"batchId": "SOURCE_PROGRESS", "jobs": [
+            {"gameId": "DONE_1", "title": "已完成", "status": "DONE", "stage": "COMPLETE"},
+            {"gameId": "NEXT_2", "originUrl": "https://example.com/next.mp4",
+             "title": "待处理", "status": "PENDING", "stage": "QUEUED"},
+        ]}
+        store.create_game(self.data_dir, "NEXT_2", {"title": "待处理"})
+        resolved = sources.ResolvedVideoSource(
+            platform="direct", sourceType="HTTP_VIDEO",
+            originUrl="https://example.com/next.mp4", sourceUrl="https://example.com/next.mp4",
+            title="待处理", resolvedAt="2026-09-09T00:00:00+1000",
+        )
+        observed: list[tuple[float, int]] = []
+        original_progress = server.CONSOLE.progress
+
+        def capture_progress(done=None, total=None, **details):
+            original_progress(done, total, **details)
+            if done is not None and total is not None:
+                observed.append((done, total))
+
+        with patch.object(server.CONSOLE, "progress", side_effect=capture_progress), \
+                patch.object(sources, "resolve", return_value=[resolved]), \
+                patch.object(video, "probe_input", return_value=video.VideoInfo(
+                    resolved.sourceUrl, 10, 1280, 720, 60)), \
+                patch.object(video, "stream_extract_frames", return_value=[
+                    {"index": 0, "atSec": 0, "file": "stream.jpg"}]):
+            server._source_batches_work(self.data_dir, [batch])(lambda _message: None)
+        self.assertEqual(observed[0], (1, 2))
+        self.assertEqual(observed[-1], (2, 2))
 
     def test_existing_interrupted_batch_can_resume_without_resubmitting_url(self):
         batch = {"batchId": "SOURCE_RESUME", "cookieBrowser": "chrome", "jobs": [{

@@ -76,12 +76,16 @@ class Console:
     def cancelled(self) -> bool:
         return self.cancel_event.is_set()
 
-    def progress(self, done: int | None = None, total: int | None = None) -> None:
+    def progress(self, done: float | None = None, total: int | None = None,
+                 **details: Any) -> None:
         with self.lock:
             if done is not None:
                 self.job["done"] = done
             if total is not None:
                 self.job["total"] = total
+            for key, value in details.items():
+                self.job[key] = value
+            self.job["updatedAt"] = time.strftime("%H:%M:%S")
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
@@ -90,7 +94,8 @@ class Console:
 
 def _idle_job() -> dict[str, Any]:
     return {"running": False, "title": "", "lines": [], "error": None,
-            "done": 0, "total": 0, "finished": False, "startedAt": ""}
+            "done": 0, "total": 0, "finished": False, "startedAt": "",
+            "updatedAt": ""}
 
 
 CONSOLE: Console | None = None
@@ -323,16 +328,21 @@ def _source_batches_work(data_dir: Path, batches: list[dict[str, Any]]) -> Calla
     eligible = [(batch, job) for batch in batches
                 for job in (batch.get("jobs") or [])
                 if isinstance(job, dict) and job.get("status") in {"PENDING", "RUNNING"}]
+    already_finished = sum(
+        1 for batch in batches for job in (batch.get("jobs") or [])
+        if isinstance(job, dict) and job.get("status") not in {"PENDING", "RUNNING"}
+    )
 
     def work(log: Callable[[str], None]) -> None:
         cleaned = sources.cleanup_cache(data_dir)
         if cleaned["removedFiles"]:
             log(f"已清理 {cleaned['removedFiles']} 个过期临时缓存文件。")
         completed = scouted = failed = 0
-        total = len(eligible)
+        total = already_finished + len(eligible)
         resolved_cache: dict[tuple[str, str, int | None], sources.ResolvedVideoSource] = {}
-        _console().progress(0, total)
-        for position, (batch, job) in enumerate(eligible, 1):
+        _console().progress(already_finished, total, stage="QUEUED", stageLabel="等待处理")
+        for queued_position, (batch, job) in enumerate(eligible, 1):
+            position = already_finished + queued_position
             batch_id = str(batch.get("batchId") or "")
             cookie_browser = str(batch.get("cookieBrowser") or "").lower()
             mode, every, start_sec, end_sec = _job_processing_config(batch, job)
@@ -343,6 +353,12 @@ def _source_batches_work(data_dir: Path, batches: list[dict[str, Any]]) -> Calla
                         "finishedAt": None, "errorCode": None, "errorMessage": None})
             sources.save_batch(data_dir, batch)
             prefix = "恢复" if job.get("recoveredAfterRestart") else "解析"
+            _console().progress(
+                position - 1, total, stage="RESOLVING", stageLabel="正在解析录像地址",
+                batchId=batch_id, currentItem=position, currentItemTitle=job["title"],
+                itemProgress=0.0, currentVideoTime=0.0, currentVideoDuration=None,
+                framesDone=None, framesTotal=None, processingSpeed=None, itemEtaSec=None,
+            )
             log(f"[{position}/{total}] {prefix}来源：{job['title']}")
             last_error_code = "RESOLVER_ERROR"
             last_error_message = "无法处理该录像。"
@@ -365,16 +381,44 @@ def _source_batches_work(data_dir: Path, batches: list[dict[str, Any]]) -> Calla
                         raise sources.SourceError("NO_VIDEO_STREAM")
                     job["stage"] = "PROBING"
                     sources.save_batch(data_dir, batch)
-                    info = video.probe_input(resolved.sourceUrl, resolved.headers)
+                    _console().progress(
+                        position - 1, total, stage="PROBING", stageLabel="正在读取录像信息",
+                        currentItem=position, currentItemTitle=job["title"], itemProgress=0.0,
+                    )
+                    analysis_source = resolved.analysisSourceUrl or resolved.sourceUrl
+                    info = video.probe_input(analysis_source, resolved.headers)
                     if info.durationSec <= 0:
                         raise video.VideoError("无法确认录像时长；暂不处理直播或无限流。")
                     job["stage"] = "STREAMING"
                     log(f"开始流式分析：{info.width}×{info.height}，{info.durationSec / 60:.1f}分钟")
+                    stream_started = time.monotonic()
+                    task_duration = ((end_sec - start_sec) if job.get("sourceParentGameId")
+                                     and end_sec is not None else info.durationSec)
+                    _console().progress(
+                        position - 1, total, stage="STREAMING", stageLabel="正在流式抽帧",
+                        currentItem=position, currentItemTitle=job["title"], itemProgress=0.0,
+                        currentVideoTime=0.0, currentVideoDuration=round(task_duration, 3),
+                        framesDone=0,
+                    )
 
                     def progress(done: int, frame_total: int, at_sec: float) -> None:
                         job["progress"] = round(done / max(1, frame_total), 4)
                         job["currentVideoTime"] = round(at_sec, 3)
-                        _console().progress(position - 1 + job["progress"], total)
+                        elapsed = max(0.001, time.monotonic() - stream_started)
+                        processed_video = (max(0.0, float(at_sec)) if job.get("sourceParentGameId")
+                                           else max(0.0, float(at_sec) - start_sec))
+                        speed = processed_video / elapsed
+                        remaining_video = max(0.0, task_duration - processed_video)
+                        _console().progress(
+                            position - 1 + job["progress"], total,
+                            stage="STREAMING", stageLabel="正在流式抽帧",
+                            currentItem=position, currentItemTitle=job["title"],
+                            itemProgress=job["progress"], currentVideoTime=round(at_sec, 3),
+                            currentVideoDuration=round(task_duration, 3),
+                            framesDone=done, framesTotal=frame_total,
+                            processingSpeed=round(speed, 3),
+                            itemEtaSec=round(remaining_video / speed) if speed > 0 else None,
+                        )
                         if done == 1 or done == frame_total or done % 10 == 0:
                             job["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
                             sources.save_batch(data_dir, batch)
@@ -391,7 +435,7 @@ def _source_batches_work(data_dir: Path, batches: list[dict[str, Any]]) -> Calla
                         )
                     else:
                         records = video.stream_extract_frames(
-                            resolved.sourceUrl, store.frames_dir(data_dir, job["gameId"]),
+                            analysis_source, store.frames_dir(data_dir, job["gameId"]),
                             info.durationSec, mode, every, start_sec, end_sec,
                             headers=resolved.headers, on_progress=progress,
                             should_cancel=_console().cancelled,
@@ -437,11 +481,30 @@ def _source_batches_work(data_dir: Path, batches: list[dict[str, Any]]) -> Calla
                             job["stage"] = "SCOUTING"
                             sources.save_batch(data_dir, batch)
                             log("检测到长直播回放：先按60秒间隔生成低清侦察帧，再划分比赛区间。")
+                            scout_started = time.monotonic()
+                            _console().progress(
+                                position - 1, total, stage="SCOUTING",
+                                stageLabel="正在生成长录像侦察帧", currentItem=position,
+                                currentItemTitle=job["title"], itemProgress=0.0,
+                                currentVideoTime=0.0, currentVideoDuration=round(info.durationSec, 3),
+                            )
 
                             def scout_progress(done: int, frame_total: int, at_sec: float) -> None:
                                 job["progress"] = round(done / max(1, frame_total), 4)
                                 job["currentVideoTime"] = round(at_sec, 3)
-                                _console().progress(position - 1 + job["progress"], total)
+                                elapsed = max(0.001, time.monotonic() - scout_started)
+                                speed = max(0.0, float(at_sec)) / elapsed
+                                _console().progress(
+                                    position - 1 + job["progress"], total,
+                                    stage="SCOUTING", stageLabel="正在生成长录像侦察帧",
+                                    currentItem=position, currentItemTitle=job["title"],
+                                    itemProgress=job["progress"], currentVideoTime=round(at_sec, 3),
+                                    currentVideoDuration=round(info.durationSec, 3),
+                                    framesDone=done, framesTotal=frame_total,
+                                    processingSpeed=round(speed, 3),
+                                    itemEtaSec=(round(max(0.0, info.durationSec - float(at_sec)) / speed)
+                                                if speed > 0 else None),
+                                )
                                 if done == 1 or done == frame_total or done % 10 == 0:
                                     job["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
                                     sources.save_batch(data_dir, batch)
@@ -497,7 +560,12 @@ def _source_batches_work(data_dir: Path, batches: list[dict[str, Any]]) -> Calla
                 log(f"❌ {job['gameId']}：{last_error_message} 后续任务继续。")
             job["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
             sources.save_batch(data_dir, batch)
-            _console().progress(position, total)
+            _console().progress(
+                position, total, stage="ITEM_COMPLETE",
+                stageLabel=("本场处理失败，已继续下一场" if job.get("status") == "FAILED"
+                            else "本场处理完成"),
+                currentItem=position, currentItemTitle=job["title"], itemProgress=1.0,
+            )
             if not any(item.get("status") in {"PENDING", "RUNNING"}
                        for item in (batch.get("jobs") or []) if isinstance(item, dict)):
                 batch["finishedAt"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -517,6 +585,8 @@ def _source_batches_work(data_dir: Path, batches: list[dict[str, Any]]) -> Calla
                         "segmentExtractionResult": batch["result"],
                         "segmentExtractionFinishedAt": batch["finishedAt"],
                     })
+        _console().progress(total, total, stage="COMPLETE", stageLabel="全部处理完成",
+                            itemProgress=1.0, itemEtaSec=0)
         log(f"录像任务完成：完整处理{completed}个，长录像侦察{scouted}个，失败{failed}个。")
 
     return work

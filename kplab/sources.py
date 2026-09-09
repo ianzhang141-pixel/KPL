@@ -494,6 +494,8 @@ def list_batches(data_dir: Path, limit: int = 10) -> list[dict[str, Any]]:
         except (OSError, ValueError, UnicodeDecodeError):
             continue
         jobs = batch.get("jobs") if isinstance(batch.get("jobs"), list) else []
+        active = next((job for job in jobs if isinstance(job, dict)
+                       and job.get("status") == "RUNNING"), None)
         summaries.append({
             "batchId": batch.get("batchId"), "createdAt": batch.get("createdAt"),
             "total": len(jobs),
@@ -502,6 +504,12 @@ def list_batches(data_dir: Path, limit: int = 10) -> list[dict[str, Any]]:
             "done": sum(1 for job in jobs if job.get("status") == "DONE"),
             "scoutDone": sum(1 for job in jobs if job.get("status") == "SCOUT_DONE"),
             "failed": sum(1 for job in jobs if job.get("status") == "FAILED"),
+            "active": ({
+                "gameId": active.get("gameId"), "title": active.get("title"),
+                "stage": active.get("stage"), "progress": active.get("progress", 0),
+                "currentVideoTime": active.get("currentVideoTime", 0),
+                "updatedAt": active.get("updatedAt"),
+            } if active else None),
         })
         if len(summaries) >= limit:
             break
