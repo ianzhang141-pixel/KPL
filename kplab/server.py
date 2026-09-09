@@ -952,7 +952,11 @@ def api_minimap_detect(body: dict[str, Any]) -> dict[str, Any]:
         # 正好告诉我们「哪里蹲着一个长得像英雄的东西」，那里就该要求更强的证据。
         static_boxes = [
             tuple(item["box"]) for item in landmarks.values()
-            if item.get("kind") in (events_cv.KIND_TOWER, events_cv.KIND_OBJECTIVE,
+            # **只用资源坑，不用防御塔。**
+            # 龙坑里确实常年蹲着一个长得像英雄的图标；防御塔不是 ——
+            # 塔的图标小，而人经常就站在塔边上。把 18 座塔也划成「要更强证据」的
+            # 区域，等于给小地图上一大半地方无差别加价，实测把几乎所有人都卡掉了。
+            if item.get("kind") in (events_cv.KIND_OBJECTIVE,
                                     events_cv.KIND_STORM_OBJECTIVE)
             and hud.valid_box(item.get("box"))
         ]
@@ -1082,6 +1086,33 @@ def api_events_scan(body: dict[str, Any]) -> dict[str, Any]:
             result["events"] = refined["events"]
             events_cv.refresh_quality(result)
     return result
+
+
+def api_minimap_suggest(body: dict[str, Any]) -> dict[str, Any]:
+    """从这一帧自己找一组红蓝阈值。
+
+    内置的那几个数字是凭经验写的起点，不同录像源色调差别很大。
+    实测里用户那份录像按默认阈值整张小地图只有个位数像素被判成队伍色 ——
+    人在界面上只看得到「认出 0 个」，完全不知道该动哪个数字。这个接口就是答这个的。
+    """
+    data_dir = _console().data_dir
+    try:
+        image = _frame_file(data_dir, str(body.get("gameId") or ""),
+                            str(body.get("file") or ""))
+    except ValueError as err:
+        return {"ok": False, "error": str(err)}
+    box = body.get("box")
+    if not hud.valid_box(box):
+        return {"ok": False, "error": "小地图区域坐标不合法，必须是 0~1 的相对值。"}
+    thresholds = minimap.load_thresholds(data_dir)
+    try:
+        data, width, height = minimap.read_rgb(image, tuple(box))
+        suggestion = minimap.suggest_thresholds(
+            data, width, height,
+            int(thresholds["minBlobPixels"]), int(thresholds["maxBlobPixels"]))
+    except Exception as err:      # noqa: BLE001 - 标定页要看见失败原因
+        return {"ok": False, "error": f"{type(err).__name__}: {err}"}
+    return {"ok": True, "suggestion": suggestion}
 
 
 def api_minimap_save(body: dict[str, Any]) -> dict[str, Any]:
@@ -1637,6 +1668,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/train": api_train,
             "/api/minimap/detect": api_minimap_detect,
             "/api/minimap/save": api_minimap_save,
+            "/api/minimap/suggest": api_minimap_suggest,
             "/api/landmarks/save": api_landmarks_save,
             "/api/landmarks/probe": api_landmarks_probe,
             "/api/events/scan": api_events_scan,

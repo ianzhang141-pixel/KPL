@@ -395,6 +395,29 @@ class SyntheticSceneRecall(unittest.TestCase):
             else:
                 self.assertEqual(match["slot"], match["claimedSlot"])
 
+    def test_broken_colour_thresholds_degrade_loudly_instead_of_returning_nothing(self):
+        # 用户实测：默认阈值和他那份录像的色调对不上，队伍色一个像素都没有，
+        # 而队伍色是硬条件 —— 于是十个人全被挡掉，界面上只写「认出 0 个」。
+        # 正确的行为是**察觉到阈值坏了**，退回只看头像，并大声说出来。
+        thresholds = minimap.default_thresholds()
+        thresholds["verified"] = True
+        # 要求「蓝比红多 250」「红比蓝多 250」—— 8 位色里不可能成立，
+        # 保证一个像素都过不了。只调最低亮度不够：英雄原画里本来就有很亮的像素。
+        thresholds["blueBOverR"] = 250
+        thresholds["redROverB"] = 250
+        broken = minimap.detect_with_portraits(
+            self.scene["image"], MINIMAP_BOX, self.scene["portraitBoxes"], thresholds,
+            static_landmark_boxes=[self.scene["pitBox"]])
+        self.assertFalse(broken["colourUsable"])
+        self.assertTrue(
+            any("阈值" in problem for problem in broken["quality"]["problems"]),
+            "颜色阈值坏掉时必须明说，不能安静地交出一个空结果。")
+        self.assertLessEqual(broken["quality"]["confidence"], 0.3,
+                             "没有颜色佐证的结果不该保留正常置信度。")
+        self.assertTrue(broken["matches"],
+                        "退化路径必须仍然给出结果 —— 否则人只看到「认出 0 个」，"
+                        "根本不知道问题出在阈值上。")
+
     def test_report_covers_all_ten_slots_with_a_reason(self):
         slots = self.with_pits["slots"]
         self.assertEqual([s["slot"] for s in slots], list(range(1, 11)))
@@ -530,6 +553,116 @@ class UnsureIdentityIsNotGuessed(unittest.TestCase):
         named = [m for m in detail["matches"] if m["slot"] is not None]
         self.assertTrue(named, "模板明显不同却还是不肯给号码，就成了另一种失灵。")
         self.assertEqual(named[0]["slot"], 1)
+
+
+class ThresholdsCanBeFoundFromTheFrame(unittest.TestCase):
+    """内置阈值和真实录像的色调对不上时，人只看得到「认出 0 个」。
+
+    实测就是这样：用户那份录像按默认阈值，整张小地图只有个位数像素
+    被判成队伍色 —— 红蓝压根没被认出来，后面所有识别当然全部失败，
+    而界面上完全看不出该动哪个数字。这一组测试钉住两件事：
+    **系统必须察觉到这件事**，并且**能自己找出一组能用的阈值**。
+    """
+
+    WIDTH = HEIGHTS = 80
+    # 这两种颜色过不了内置阈值：蓝−红只有 35（门槛 40），红−蓝只有 30（门槛 40）。
+    DIM_BLUE = (110, 120, 145)
+    DIM_RED = (150, 118, 120)
+    # 极度饱和的干扰块：任何严格阈值都能选中它们。
+    LOUD_BLUE = (20, 20, 250)
+    LOUD_RED = (250, 20, 20)
+
+    def _map(self, ring_colour, count=5, decoy=None):
+        """五个「暗淡的」队伍色圈，外加两个**极度饱和**的干扰块。
+
+        干扰块是这组测试的关键：只挑「最严的一组阈值」的话，
+        搜索会停在只认得出这两个干扰块的地方（2 个色块），
+        真正的五个人一个都找不到。必须以「色块数最接近 5」为准。
+        """
+        size = self.WIDTH
+        pixels = bytearray(bytes((30, 38, 32)) * (size * size))
+        if decoy:
+            for corner in ((4, 4), (size - 14, 4)):
+                for y in range(corner[1], corner[1] + 9):
+                    for x in range(corner[0], corner[0] + 9):
+                        base = (y * size + x) * 3
+                        pixels[base:base + 3] = bytes(decoy)
+        for index in range(count):
+            cx = 12 + index * 13
+            cy = 20 + (index % 3) * 18
+            for y in range(cy - 6, cy + 7):
+                for x in range(cx - 6, cx + 7):
+                    if not (0 <= x < size and 0 <= y < size):
+                        continue
+                    distance = math.hypot(x - cx, y - cy)
+                    if 4.0 <= distance <= 6.0:
+                        base = (y * size + x) * 3
+                        pixels[base:base + 3] = bytes(ring_colour)
+        return bytes(pixels)
+
+    def test_default_thresholds_really_do_miss_these_colours(self):
+        # 先证明这个样本确实打得到痛点，否则下面两条测的是空气。
+        raw = self._map(self.DIM_BLUE)
+        labels = minimap.classify_pixels(raw, self.WIDTH, self.WIDTH,
+                                         minimap.default_thresholds())
+        self.assertEqual(sum(1 for label in labels if label), 0,
+                         "这个样本按默认阈值本来就该一个像素都认不出，否则测不到东西。")
+
+    def test_search_finds_thresholds_that_actually_work(self):
+        raw = self._map(self.DIM_BLUE, decoy=self.LOUD_BLUE)
+        found = minimap.suggest_thresholds(raw, self.WIDTH, self.WIDTH, 12, 900)
+        self.assertTrue(found["blue"]["found"], "自动搜索没能找出任何可用的蓝色阈值。")
+        thresholds = minimap.default_thresholds()
+        for key in ("blueMinB", "blueBOverR", "blueBOverG"):
+            thresholds[key] = found["blue"][key]
+        labels = minimap.classify_pixels(raw, self.WIDTH, self.WIDTH, thresholds)
+        blobs, _ = minimap.find_blobs(labels, self.WIDTH, self.WIDTH, 1, 12, 900)
+        # 图上一共 7 块队伍色：5 个人 + 2 个干扰块。
+        # 五个人必须都找到 —— 只认出两个干扰块（只挑最严阈值的结果）不算数。
+        self.assertGreaterEqual(len(blobs), 5,
+                                f"按搜出来的阈值只找到 {len(blobs)} 个色块，"
+                                "五个人没找全（多半是停在只认得出干扰块的严阈值上）。")
+        self.assertLessEqual(len(blobs), 8, "搜出来的阈值太松，认出的色块比实际还多。")
+        blue, red_channel, green = self.DIM_BLUE[2], self.DIM_BLUE[0], self.DIM_BLUE[1]
+        self.assertTrue(
+            blue >= thresholds["blueMinB"]
+            and blue - red_channel >= thresholds["blueBOverR"]
+            and blue - green >= thresholds["blueBOverG"],
+            "搜出来的阈值选不中真正的圈的颜色。")
+
+    def test_red_side_too(self):
+        raw = self._map(self.DIM_RED, decoy=self.LOUD_RED)
+        found = minimap.suggest_thresholds(raw, self.WIDTH, self.WIDTH, 12, 900)
+        self.assertTrue(found["red"]["found"])
+        thresholds = minimap.default_thresholds()
+        for key in ("redMinR", "redROverB", "redROverG"):
+            thresholds[key] = found["red"][key]
+        labels = minimap.classify_pixels(raw, self.WIDTH, self.WIDTH, thresholds)
+        blobs, _ = minimap.find_blobs(labels, self.WIDTH, self.WIDTH, 2, 12, 900)
+        self.assertGreaterEqual(len(blobs), 5)
+        self.assertLessEqual(len(blobs), 8)
+
+    def test_missing_colour_evidence_is_never_silent(self):
+        # 颜色证据整体缺失时，不能安静地交出一个空结果 ——
+        # 那不是「场上没人」，那是阈值没标定好。
+        self.assertGreater(minimap.MIN_COLOUR_EVIDENCE, 0.0)
+        self.assertLess(minimap.MIN_COLOUR_EVIDENCE, 0.01,
+                        "这个下限设得太高，正常画面也会被判成「颜色不可用」。")
+
+
+class StaticZonesComeFromPitsOnly(unittest.TestCase):
+    """防御塔不该被划成「要更强证据」的区域。"""
+
+    def test_server_excludes_towers(self):
+        source = (Path(__file__).resolve().parents[1] / "kplab" / "server.py").read_text("utf-8")
+        start = source.index("static_boxes = [")
+        block = source[start:source.index("\n        ]", start)]
+        self.assertIn("KIND_OBJECTIVE", block)
+        self.assertIn("KIND_STORM_OBJECTIVE", block)
+        self.assertNotIn(
+            "KIND_TOWER", block,
+            "18 座塔也算成静态禁区，等于给小地图上一大半地方无差别加价 —— "
+            "实测把几乎所有人都卡掉了。龙坑里常年蹲着一个像英雄的图标，塔不是。")
 
 
 class AssignmentIsExactNotGreedy(unittest.TestCase):

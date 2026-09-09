@@ -298,8 +298,9 @@
           <p class="help">小于这个的当噪点丢掉。小地图按 160×160 算。</p></div>
         <div class="f"><label>一团最多多少像素</label><input type="number" id="maxBlobPixels">
           <p class="help">大于这个的多半是整片地图底色，也丢掉。</p></div>
-        <div class="f" style="display:flex;align-items:flex-end;gap:6px">
+        <div class="f" style="display:flex;align-items:flex-end;gap:6px;flex-wrap:wrap">
           <button onclick="tryMinimap()">试一次</button>
+          <button class="ghost sm" onclick="suggestMinimap()">自动找红蓝阈值</button>
           <button class="ghost sm" onclick="resetMinimap()">恢复默认</button></div>
       </div>
 
@@ -768,6 +769,34 @@ function resetMinimap(){
   msg('mmMsg','已填回出厂默认值。还没生效 —— 点「试一次」看效果，满意再存。','warn');
 }
 
+// 从这一帧自己找一组红蓝阈值。
+// 内置那几个数字是凭经验写的起点，不同录像源色调差别很大；
+// 对不上的时候，人在界面上只看得到「认出 0 个」，根本不知道该动哪个数字。
+async function suggestMinimap(){
+  if(!REGIONS.minimap){ msg('mmMsg','先标定「小地图」那一项。','err'); return; }
+  if(!CURRENT){ msg('mmMsg','先选一张帧图。','err'); return; }
+  msg('mmMsg','正在从这一帧里找红蓝阈值…','ok');
+  const res = await api('/api/minimap/suggest',
+                        {gameId:GAME, file:CURRENT.file, box:REGIONS.minimap});
+  if(!res.ok){ msg('mmMsg', res.error, 'err'); return; }
+  const sg = res.suggestion || {};
+  const lines = [];
+  let filled = 0;
+  for(const [team,label] of [['blue','蓝方'],['red','红方']]){
+    const found = sg[team] || {};
+    if(!found.found){ lines.push(`${label}：没找到像队伍色标记的像素组合。`); continue; }
+    for(const key of MM_KEYS) if(found[key]!==undefined){ $(key).value = found[key]; filled++; }
+    lines.push(`${label}：找到 ${found.blobs} 个大小合适的色块`+
+      `（目标 5 个；丢掉太小的 ${found.tooSmall} 个、太大的 ${found.tooLarge} 个）。`);
+  }
+  lines.push('');
+  lines.push('这只是一个**能让你继续往下走的起点，不保证对**。');
+  lines.push('现在点「试一次」，看图上的圆点是不是真的落在人身上；');
+  lines.push('不对就手动微调这六个数字，对了再点最下面的按钮存起来。');
+  msg('mmMsg', lines.join('\n'), filled ? 'warn' : 'err');
+  $('slotReport').innerHTML='';
+}
+
 async function tryMinimap(){
   if(!REGIONS.minimap){ msg('mmMsg','先标定「小地图」那一项。','err'); return; }
   if(!CURRENT){ msg('mmMsg','先选一张帧图。','err'); return; }
@@ -783,7 +812,11 @@ async function tryMinimap(){
   LAST = {blue:r.blue, red:r.red, usable:r.quality.usable};
   drawOverlay();
   renderSlots(r);
-  const head = `${r.method==='portrait-template'?'头像逐一匹配':'颜色候选'}：蓝方 ${r.blueCount} 个、红方 ${r.redCount} 个，置信度 ${r.quality.confidence}`;
+  const head = (r.colourUsable===false
+      ? `⚠️ 红蓝颜色没被认出来（整张小地图只有 ${r.colouredPixels} 个像素被判成队伍色）——`
+        + `请先点「自动找红蓝阈值」。下面这次结果只靠头像匹配，误检会很多。\n`
+      : '')
+    + `${r.method==='portrait-template'?'头像逐一匹配':'颜色候选'}：蓝方 ${r.blueCount} 个、红方 ${r.redCount} 个，置信度 ${r.quality.confidence}`;
   const tune = r.method==='portrait-template'
     ? '\n头像匹配会主动拒绝低相似候选；漏检先保留，不要为了凑齐10人放宽到产生假点。'
     : (r.blueCount + r.redCount > 10

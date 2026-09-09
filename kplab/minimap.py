@@ -277,6 +277,131 @@ def find_blobs(
 OVERSIZE = 3
 
 
+# 自动找阈值时扫的网格。刻意留粗 —— 目的是把人从「完全认不出」带到「大致能用」，
+# 剩下的微调交给标定页上的手动输入。
+SUGGEST_MIN_GRID = (60, 80, 100, 120, 140, 160)
+SUGGEST_OVER_MAIN_GRID = (15, 25, 40, 55, 70, 90)
+SUGGEST_OVER_GREEN_GRID = (0, 10, 20, 35, 50)
+
+
+def _suffix_histogram(values: list[tuple[int, int, int]],
+                      grids: tuple[tuple[int, ...], ...]) -> list[list[list[int]]]:
+    """三维后缀直方图：一次遍历像素，之后任意阈值组合都能 O(1) 查到数量。
+
+    否则每试一组阈值就要重扫两万五千个像素，一百八十组要扫掉好几秒 ——
+    而这个功能必须是「点一下就出结果」，不然人不会用它。
+    """
+    sizes = [len(grid) for grid in grids]
+    hist = [[[0] * sizes[2] for _ in range(sizes[1])] for _ in range(sizes[0])]
+    for triple in values:
+        indices = []
+        for axis in range(3):
+            grid, value = grids[axis], triple[axis]
+            index = -1
+            for position, edge in enumerate(grid):
+                if value >= edge:
+                    index = position
+            indices.append(index)
+        if min(indices) < 0:
+            continue
+        hist[indices[0]][indices[1]][indices[2]] += 1
+    for i in range(sizes[0] - 1, -1, -1):          # 从高到低做后缀和
+        for j in range(sizes[1] - 1, -1, -1):
+            for k in range(sizes[2] - 1, -1, -1):
+                total = hist[i][j][k]
+                if i + 1 < sizes[0]:
+                    total += hist[i + 1][j][k]
+                if j + 1 < sizes[1]:
+                    total += hist[i][j + 1][k]
+                if k + 1 < sizes[2]:
+                    total += hist[i][j][k + 1]
+                if i + 1 < sizes[0] and j + 1 < sizes[1]:
+                    total -= hist[i + 1][j + 1][k]
+                if i + 1 < sizes[0] and k + 1 < sizes[2]:
+                    total -= hist[i + 1][j][k + 1]
+                if j + 1 < sizes[1] and k + 1 < sizes[2]:
+                    total -= hist[i][j + 1][k + 1]
+                if i + 1 < sizes[0] and j + 1 < sizes[1] and k + 1 < sizes[2]:
+                    total += hist[i + 1][j + 1][k + 1]
+                hist[i][j][k] = total
+    return hist
+
+
+def suggest_thresholds(
+    data: bytes, width: int, height: int,
+    min_pixels: int, max_pixels: int, wanted: int = 5,
+) -> dict[str, Any]:
+    """从这一帧自己找出红蓝阈值。
+
+    **为什么需要它。** 内置的那几个数字是凭经验写的起点。不同录像源的色调
+    差别很大，实测里用户那份录像按默认阈值**整张小地图只有个位数像素**
+    被判成队伍色 —— 红蓝压根没被认出来，后面所有识别当然全部失败，
+    而人在界面上只看得到「认出 0 个」，完全不知道该动哪个数字。
+
+    **怎么找。** 目标很明确：每方应该出现 **5 个大小合适的连通块**。
+    在阈值网格上搜，取「块数最接近 5」的那一组；同样接近时取**更严**的一组
+    （宁可漏也不要把地图纹理算进来）。
+
+    **它不保证对。** 找出来的只是一个能让人继续往下走的起点，
+    仍然要人对着图上的圆点确认。所以返回值里带着找到几个块、
+    多少像素被判成队伍色，让人自己判断可不可信。
+    """
+    blues: list[tuple[int, int, int]] = []
+    reds: list[tuple[int, int, int]] = []
+    for index in range(width * height):
+        base = index * 3
+        red, green, blue = data[base], data[base + 1], data[base + 2]
+        blues.append((blue, blue - red, blue - green))
+        reds.append((red, red - blue, red - green))
+
+    grids = (SUGGEST_MIN_GRID, SUGGEST_OVER_MAIN_GRID, SUGGEST_OVER_GREEN_GRID)
+    out: dict[str, Any] = {"wanted": wanted}
+    for name, values, keys in (
+            ("blue", blues, ("blueMinB", "blueBOverR", "blueBOverG")),
+            ("red", reds, ("redMinR", "redROverB", "redROverG"))):
+        hist = _suffix_histogram(values, grids)
+        # 先按「被选中的像素数」筛掉离谱的组合，再对少数几个真的跑连通域。
+        plausible = []
+        for i, low in enumerate(grids[0]):
+            for j, over_main in enumerate(grids[1]):
+                for k, over_green in enumerate(grids[2]):
+                    count = hist[i][j][k]
+                    if count < min_pixels * wanted * 2 or count > width * height * 0.12:
+                        continue
+                    plausible.append((count, (low, over_main, over_green)))
+        # 不猜「应该有多少像素」—— 那又是一个拍脑袋的数。
+        # 把还说得过去的组合按像素数排开，均匀取样最多 40 组真跑一遍连通域。
+        plausible.sort()
+        if len(plausible) > 40:
+            step = len(plausible) / 40.0
+            plausible = [plausible[int(index * step)] for index in range(40)]
+        best = None
+        tried = 0
+        for _, triple in plausible:
+            low, over_main, over_green = triple
+            labels = [0] * (width * height)
+            for index, (main, d_main, d_green) in enumerate(values):
+                if main >= low and d_main >= over_main and d_green >= over_green:
+                    labels[index] = 1
+            blobs, rejected = find_blobs(labels, width, height, 1, min_pixels, max_pixels)
+            tried += 1
+            # 先看块数离 5 有多远；再看有没有大到离谱的团块（那是阈值太松，
+            # 把整片地图底色连成了一片）；最后同分取**更严**的一组，宁可漏不要假。
+            key = (abs(len(blobs) - wanted), rejected["tooLarge"],
+                   -(low + over_main + over_green))
+            if best is None or key < best[0]:
+                best = (key, triple, len(blobs), rejected, sum(hist[i][j][k] for i, j, k in [(0, 0, 0)]))
+        if best is None:
+            out[name] = {"found": False, "tried": tried,
+                         "note": "这一帧上找不到任何看起来像队伍色标记的像素组合。"}
+            continue
+        _, triple, blob_count, rejected, _ = best
+        out[name] = {"found": True, "tried": tried, "blobs": blob_count,
+                     "tooLarge": rejected["tooLarge"], "tooSmall": rejected["tooSmall"],
+                     **dict(zip(keys, triple))}
+    return out
+
+
 def marker_mask(
     labels: list[int], width: int, height: int,
     min_pixels: int, max_pixels: int,
@@ -587,6 +712,11 @@ DEFAULT_MIN_MARKER_RATIO = 0.06
 # 所以判据是：**禁止这一对之后，最优总分掉了多少。**掉得少，说明换成别人也一样，
 # 那就不写号码，只报「这里有一个本方的人」—— 位置是真的，身份不装。
 AMBIGUITY_MARGIN = 0.02
+
+# 整张小地图上被判成队伍色的像素低于这个比例，就认为**颜色阈值没标定好**。
+# 十个小圆点通常占 1%~5%；低到 0.2% 以下，说明红蓝压根没被认出来 ——
+# 这时把颜色当硬门槛，会把所有人都挡掉（实测就是这样，用户看到「几乎无法识别」）。
+MIN_COLOUR_EVIDENCE = 0.002
 
 # 圈上有这么大比例被判成 OVERSIZE（特效糊住）时，改为抬门槛而不是直接否决。
 EFFECT_BLOCKED_RATIO = 0.30
@@ -995,8 +1125,16 @@ def detect_with_portraits(
             continue
         templates[int(slot)] = raw
     zones = static_zones_in_minimap(box, static_landmark_boxes or [], width, height)
+    # 整张小地图上按当前阈值有多少像素被判成了队伍色。
+    # 十个小圆点通常占 1%~5%；**接近 0 说明阈值和这个录像的色调根本对不上**。
+    coloured = sum(1 for label in labels if label)
+    coloured_ratio = coloured / max(1, width * height)
+    colour_usable = coloured_ratio >= MIN_COLOUR_EVIDENCE
+    # 颜色证据整体就不存在时，绝不能拿它当硬门槛 ——
+    # 那不是「场上没人」，那是**阈值还没标定好**。这时退回「颜色只作弱佐证」，
+    # 并把这件事大声说出来、把置信度压死，而不是安静地交出一个空结果。
     detail = match_portraits_detailed(
-        data, width, height, templates, marker,
+        data, width, height, templates, marker if colour_usable else None,
         min_similarity=min_similarity, static_zones=zones,
         min_marker_ratio=float(thresholds.get("minMarkerRatio",
                                               DEFAULT_MIN_MARKER_RATIO)))
@@ -1014,6 +1152,13 @@ def detect_with_portraits(
     red = [m for m in matches if m["teamId"] == 200]
     named = [m for m in matches if m["slot"] is not None]
     problems: list[str] = []
+    if not colour_usable:
+        problems.append(
+            f"⚠️ 按当前颜色阈值，整张小地图只有 {coloured} 个像素"
+            f"（{coloured_ratio * 100:.2f}%）被判成队伍颜色 —— 正常应该在 1%~5%。"
+            "**阈值和这个录像的色调对不上，红蓝根本没被认出来。**"
+            "本次已退回「只看头像、不看颜色」，误检会明显变多，置信度已压到 0.3 以下。"
+            "请先点「自动找红蓝阈值」，或手动把「至少多亮」「要比…多」几个数字调小。")
     if marker_stats["tooLarge"]:
         problems.append(
             f"有 {marker_stats['tooLarge']} 片队伍色区域大到不可能是英雄标记"
@@ -1034,6 +1179,8 @@ def detect_with_portraits(
             f"有 {len(matches) - len(named)} 个位置**认得出有人、认不出是谁**，"
             "只按队伍报出来，没有写号码 —— 硬安一个号码只会把错的写进数据里。")
     confidence = (sum(m["confidence"] for m in matches) / len(matches)) if matches else 0.0
+    if not colour_usable:
+        confidence = min(confidence, 0.3)
     if not thresholds.get("verified"):
         confidence = min(confidence, 0.45)
         problems.append("阵营颜色阈值尚未人工核验，整体置信度已封顶为 0.45。")
@@ -1043,6 +1190,9 @@ def detect_with_portraits(
         "namedCount": len(named),
         "ambiguousCount": len(matches) - len(named),
         "markerStats": marker_stats,
+        "colouredPixels": coloured,
+        "colouredRatio": round(coloured_ratio, 5),
+        "colourUsable": colour_usable,
         "minMarkerRatio": float(thresholds.get("minMarkerRatio",
                                                DEFAULT_MIN_MARKER_RATIO)),
         "portraitTemplateCount": len(templates),
