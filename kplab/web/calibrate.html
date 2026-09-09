@@ -22,6 +22,8 @@
            padding:8px 14px; font:inherit; font-size:13px; cursor:pointer; white-space:nowrap; }
   button.ghost { background:#232935; border-color:#2f3644; color:#e6e9ef; }
   button.sm { padding:5px 10px; font-size:12px; }
+  button.tiny { padding:3px 8px; font-size:11px; background:#232935;
+                border-color:#2f3644; color:#c6ccd8; }
   button:disabled { opacity:.45; cursor:not-allowed; }
   .row { display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:9px; }
   .row > div { flex:1; min-width:80px; }
@@ -39,6 +41,7 @@
   .box b { position:absolute; top:-19px; left:-2px; font-size:10px; background:#3b82f6;
            color:#fff; padding:1px 5px; border-radius:3px; font-weight:600; white-space:nowrap; }
   .box.mini b { background:#f59e0b; }
+  .box.cur { border-width:3px; box-shadow:0 0 0 2px rgba(255,255,255,.35); }
   .dot { position:absolute; width:11px; height:11px; border-radius:50%;
          transform:translate(-50%,-50%); border:2px solid #0f1216; pointer-events:none; }
   .rlist { max-height:250px; overflow:auto; }
@@ -47,6 +50,7 @@
   .ritem:hover { background:#1b2029; }
   .ritem.on { background:#1e2a3d; }
   .ritem.done { color:#86efac; }
+  .ritem.hid { opacity:.5; }
   .tip { color:#8b93a1; font-size:12px; border-left:3px solid #3b82f6; padding-left:10px;
          margin:10px 0 0; white-space:pre-wrap; }
   .strip { display:flex; gap:5px; overflow-x:auto; padding:8px 0 2px; }
@@ -57,6 +61,44 @@
           border:1px solid #2f3644; color:#8b93a1; }
   .pill.on { border-color:#16663a; color:#86efac; background:#0d2a17; }
   .pill.off{ border-color:#7a2a2f; color:#fca5a5; background:#2a1113; }
+
+  /* 当前正在标什么 —— 拖框之前必须一眼看得见 */
+  .now { background:#12243c; border:1px solid #1e3a5f; border-radius:6px;
+         padding:8px 11px; font-size:12.5px; margin:0 0 10px; }
+  .now.none { background:#2a2211; border-color:#7a5f2a; color:#fcd34d; }
+
+  /* 显示 / 隐藏工具条 */
+  .tools { display:flex; gap:6px; flex-wrap:wrap; margin:0 0 9px; }
+  .eye { background:none; border:1px solid transparent; color:#5b6373; cursor:pointer;
+         padding:2px 6px; font-size:12px; border-radius:4px; line-height:1.2; }
+  .eye:hover { background:#232935; }
+  .eye.hid { color:#f59e0b; }
+
+  /* 地标：26 个全部平铺，点一下就能标，不再藏在下拉框里 */
+  .lmgroup { margin:12px 0 0; }
+  .lmgroup:first-child { margin-top:0; }
+  .lmhead { display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+            font-size:12px; color:#8b93a1; margin:0 0 6px; }
+  .lmhead .name { font-weight:600; color:#c6ccd8; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; }
+  .chip { display:inline-flex; align-items:stretch; border:1px solid #2f3644;
+          border-radius:6px; overflow:hidden; background:#161b22; }
+  .chip .pick { background:none; border:0; color:#c6ccd8; padding:5px 8px;
+                font:inherit; font-size:12px; cursor:pointer; white-space:nowrap; }
+  .chip.done .pick { color:#86efac; }
+  .chip.on { border-color:#3b82f6; }
+  .chip.on .pick { background:#1e3a5f; color:#fff; }
+  .chip.hid { opacity:.5; }
+  .chip .eye { border:0; border-left:1px solid #2f3644; border-radius:0; padding:0 7px; }
+
+  .fields { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+  @media (max-width:520px){ .fields{grid-template-columns:1fr 1fr;} }
+  .fields .f label { font-size:11px; }
+  .help { color:#5b6373; font-size:11px; margin:3px 0 0; line-height:1.4; }
+  details.expl { margin:8px 0 10px; }
+  details.expl summary { cursor:pointer; color:#7aa7ff; font-size:12px; }
+  details.expl .body { color:#8b93a1; font-size:12px; white-space:pre-wrap;
+                       border-left:3px solid #2f3644; padding-left:10px; margin-top:7px; }
 </style>
 
 <h1>标定 · 告诉系统「数字在画面的哪个位置」</h1>
@@ -75,6 +117,14 @@
           <option value="full_scoreboard">赛事转播固定记分板</option>
         </select></div>
       </div>
+      <div class="now none" id="now">还没选要标的东西 —— 先在右边点一个项目或地标。</div>
+      <div class="tools">
+        <button class="tiny" onclick="showAll()">显示全部框</button>
+        <button class="tiny" onclick="hideAll()">隐藏全部框</button>
+        <button class="tiny" onclick="onlyCurrent()">只显示当前这个</button>
+        <span style="color:#5b6373;font-size:11px;align-self:center"
+              id="hiddenCount"></span>
+      </div>
       <div class="strip" id="strip"></div>
       <div class="stage" id="stage">
         <img id="img" alt="">
@@ -83,6 +133,9 @@
       <p class="tip" id="hint">
 先在右边点一个要标定的项目，然后<b>在图上按住鼠标拖一个框</b>把那个数字圈起来。
 框要贴紧数字，多圈进来一些背景会让识别变差。
+
+框太多看不清地图时，用上面的「隐藏全部框」，或点每一项右边的 👁 单独隐藏。
+<b>隐藏只是不画出来，标好的坐标一个都不会丢。</b>
       </p>
     </div>
   </div>
@@ -104,17 +157,21 @@
 系统靠「图标在不在」来判断推塔和打龙 —— 塔被拆了，小地图上那个图标就没了。
 所以要先告诉它<b>每个图标在画面的哪个位置</b>。
 
-先在下面选一个地标，再到画面上把那个图标<b>框小一点、贴紧图标</b>，
+<b>点下面任意一个方块</b>就开始标它，再到画面上把那个图标<b>框小一点、贴紧图标</b>。
 框太大会把周围的地图背景一起框进去，图标消失也测不出变化。
+方块右边的 👁 是<b>只隐藏这个框，不删数据</b>；要删数据请用下面的「删掉当前地标」。
       </p>
-      <div class="row">
-        <div style="flex:2"><label>要标的地标</label><select id="lmSel"></select></div>
-        <div style="flex:0"><button class="ghost sm" onclick="probeLm()">试读这一块</button></div>
-        <div style="flex:0"><button class="ghost sm" onclick="delLm()">删掉</button></div>
+      <div class="tools">
+        <button class="tiny" onclick="showAllLm()">显示全部地标框</button>
+        <button class="tiny" onclick="hideAllLm()">隐藏全部地标框</button>
       </div>
-      <div class="rlist" id="lmList" style="max-height:190px"></div>
-      <div class="row" style="margin-top:10px">
+      <div id="lmGroups"></div>
+      <div class="row" style="margin-top:12px">
         <div style="flex:0"><button onclick="saveLm()">保存地标</button></div>
+        <div style="flex:0"><button class="ghost sm" onclick="probeLm()">试读当前这块</button></div>
+        <div style="flex:0"><button class="ghost sm" onclick="delLm()">删掉当前地标</button></div>
+      </div>
+      <div class="row">
         <div style="flex:0"><button class="ghost" onclick="scanEvents()">用它跑一遍事件检测</button></div>
       </div>
       <div class="msg" id="lmMsg"></div>
@@ -123,25 +180,59 @@
     <div class="card" style="margin-top:14px">
       <h2>② 小地图颜色调试 <span class="pill" id="mmPill">未标定</span></h2>
       <p class="tip" style="margin-top:0">
-标好「小地图」那一项之后，点下面的按钮试一次。
+标好「小地图」那一项之后，点「试一次」。
 系统会在图上把认出来的人用小圆点标出来。
-<b>每方最多 5 个</b> —— 认出超过 5 个说明阈值太松，会被判为不可用。
+<b>每方最多 5 个</b> —— 认出超过 5 个说明条件太松，会被判为不可用。
       </p>
-      <div class="row">
-        <div><label>蓝 最低B</label><input type="number" id="blueMinB"></div>
-        <div><label>蓝 B-R</label><input type="number" id="blueBOverR"></div>
-        <div><label>蓝 B-G</label><input type="number" id="blueBOverG"></div>
+
+      <details class="expl">
+        <summary>这些数字到底是什么意思？（第一次用请点开）</summary>
+        <div class="body">小地图上的英雄是<b>彩色圆点</b>，没有文字可以读，只能靠颜色认。
+系统把小地图缩成 160×160，然后<b>一个像素一个像素地问</b>：
+这个像素是蓝方的颜色吗？是红方的颜色吗？都不是就当地图背景丢掉。
+
+判断一个像素算不算<b>蓝方</b>，要<b>同时</b>满足下面三条：
+　　① 蓝色分量 ≥「蓝色至少多亮」
+　　② 蓝色分量 − 红色分量 ≥「蓝要比红多」
+　　③ 蓝色分量 − 绿色分量 ≥「蓝要比绿多」
+红方同理，把蓝红对调。所有数字都是 0～255 的色彩强度。
+
+为什么要后面两条？只看「够不够蓝」的话，白色、紫色、青色都会被算成蓝方
+—— 它们的蓝色分量也很高。加上「要比红多、比绿多」才排除得掉。
+
+挑出这些像素后，系统把<b>挨在一起的</b>归成一团，一团就是一个人。
+「一团最少/最多多少像素」用来把噪点（太小）和大片地图底色（太大）扔掉。
+
+怎么调：<b>认出来的人太少 → 把数字调小（放松）；超过 5 个 → 调大（收紧）。</b>
+每改一次都点「试一次」看图上的圆点对不对，对了再点最下面那个按钮存起来。</div>
+      </details>
+
+      <div class="fields">
+        <div class="f"><label>蓝点：蓝色至少多亮</label><input type="number" id="blueMinB">
+          <p class="help">0–255。像素的蓝色分量低于这个数，直接不算蓝方。</p></div>
+        <div class="f"><label>蓝点：蓝要比红多</label><input type="number" id="blueBOverR">
+          <p class="help">蓝 − 红 至少这么多。挡掉白色和紫色。</p></div>
+        <div class="f"><label>蓝点：蓝要比绿多</label><input type="number" id="blueBOverG">
+          <p class="help">蓝 − 绿 至少这么多。挡掉青色。</p></div>
       </div>
-      <div class="row">
-        <div><label>红 最低R</label><input type="number" id="redMinR"></div>
-        <div><label>红 R-B</label><input type="number" id="redROverB"></div>
-        <div><label>红 R-G</label><input type="number" id="redROverG"></div>
+      <div class="fields" style="margin-top:10px">
+        <div class="f"><label>红点：红色至少多亮</label><input type="number" id="redMinR">
+          <p class="help">0–255。像素的红色分量低于这个数，直接不算红方。</p></div>
+        <div class="f"><label>红点：红要比蓝多</label><input type="number" id="redROverB">
+          <p class="help">红 − 蓝 至少这么多。挡掉白色和粉色。</p></div>
+        <div class="f"><label>红点：红要比绿多</label><input type="number" id="redROverG">
+          <p class="help">红 − 绿 至少这么多。挡掉橙色和黄色。</p></div>
       </div>
-      <div class="row">
-        <div><label>最小像素</label><input type="number" id="minBlobPixels"></div>
-        <div><label>最大像素</label><input type="number" id="maxBlobPixels"></div>
-        <div style="flex:0"><button onclick="tryMinimap()">试一次</button></div>
+      <div class="fields" style="margin-top:10px">
+        <div class="f"><label>一团最少多少像素</label><input type="number" id="minBlobPixels">
+          <p class="help">小于这个的当噪点丢掉。小地图按 160×160 算。</p></div>
+        <div class="f"><label>一团最多多少像素</label><input type="number" id="maxBlobPixels">
+          <p class="help">大于这个的多半是整片地图底色，也丢掉。</p></div>
+        <div class="f" style="display:flex;align-items:flex-end;gap:6px">
+          <button onclick="tryMinimap()">试一次</button>
+          <button class="ghost sm" onclick="resetMinimap()">恢复默认</button></div>
       </div>
+
       <div class="msg" id="mmMsg"></div>
       <div class="row" style="margin-top:8px">
         <div style="flex:0"><button class="ghost" id="mmSave" onclick="saveMinimap()" disabled>
@@ -154,8 +245,63 @@
 <script>
 const $ = id => document.getElementById(id);
 let GAME='', FRAMES=[], CURRENT=null, REGIONS={}, ACTIVE=null, SPECS={}, LAST=null, PROFILES={};
-let LANDMARKS={}, LM_ACTIVE=null;
+let LANDMARKS={}, LM_ACTIVE=null, MM_DEFAULTS={};
 
+const MM_KEYS = ['blueMinB','blueBOverR','blueBOverG','redMinR','redROverB','redROverG',
+                 'minBlobPixels','maxBlobPixels'];
+
+// ---------------------------------------------------------------- 显示 / 隐藏
+// 「隐藏」只影响画不画这个框，不动 REGIONS / LANDMARKS 里的坐标。
+// 这个区分必须守住：用户抱怨的是框太多看不清地图，不是想删标定结果。
+const HIDE_KEY = 'kplab.calibrate.hidden';
+let HIDDEN = new Set();
+function loadHidden(){
+  try { const raw = localStorage.getItem(HIDE_KEY);
+        if(raw) HIDDEN = new Set(JSON.parse(raw)); } catch(e) { HIDDEN = new Set(); }
+}
+function saveHidden(){
+  try { localStorage.setItem(HIDE_KEY, JSON.stringify([...HIDDEN])); } catch(e) {}
+}
+const rKey = k => 'r:'+k;
+const lKey = n => 'l:'+n;
+function isHidden(key){ return HIDDEN.has(key); }
+function setHidden(key, hide){ if(hide) HIDDEN.add(key); else HIDDEN.delete(key); }
+function toggleHidden(key, ev){
+  if(ev) ev.stopPropagation();
+  setHidden(key, !isHidden(key));
+  saveHidden(); renderRegions(); renderLm();
+}
+function allKeys(){
+  return [...currentList().map(l=>rKey(l[0])), ...LM_PLAN.map(l=>lKey(l.name))];
+}
+function showAll(){ HIDDEN.clear(); saveHidden(); renderRegions(); renderLm(); }
+function hideAll(){ allKeys().forEach(k=>HIDDEN.add(k)); saveHidden(); renderRegions(); renderLm(); }
+function onlyCurrent(){
+  const keep = ACTIVE ? rKey(ACTIVE) : (LM_ACTIVE ? lKey(LM_ACTIVE) : null);
+  HIDDEN = new Set(allKeys().filter(k=>k!==keep));
+  saveHidden(); renderRegions(); renderLm();
+}
+function showAllLm(){ LM_PLAN.forEach(l=>HIDDEN.delete(lKey(l.name)));
+  saveHidden(); renderRegions(); renderLm(); }
+function hideAllLm(){ LM_PLAN.forEach(l=>HIDDEN.add(lKey(l.name)));
+  saveHidden(); renderRegions(); renderLm(); }
+function setGroupHidden(kind, hide){
+  LM_PLAN.filter(l=>l.kind===kind).forEach(l=>setHidden(lKey(l.name), hide));
+  saveHidden(); renderRegions(); renderLm();
+}
+// 眼睛按钮。隐藏的东西如果被选中要标，自动帮它显示出来，
+// 否则用户拖了框却什么都看不见，会以为功能坏了。
+function eyeBtn(key){
+  const hid = isHidden(key);
+  return `<button class="eye ${hid?'hid':''}" title="${hid?'点一下重新显示这个框':'点一下在图上隐藏这个框（不会删掉标好的坐标）'}"
+    onclick="toggleHidden('${key}', event)">${hid?'🚫':'👁'}</button>`;
+}
+function updateHiddenCount(){
+  const n = allKeys().filter(k=>HIDDEN.has(k)).length;
+  $('hiddenCount').textContent = n ? `已隐藏 ${n} 个框（数据都在）` : '';
+}
+
+// ---------------------------------------------------------------- 地标清单
 // 要标哪些地标。塔的数量按「每路 2 座 + 3 座高地」算，
 // 具体几座取决于版本 —— 少标几座不影响，标了的那些就能测。
 function landmarkPlan(){
@@ -176,31 +322,70 @@ function landmarkPlan(){
   return out;
 }
 const LM_PLAN = landmarkPlan();
+const LM_GROUPS = [['tower','防御塔'], ['objective','资源坑'], ['portrait','英雄头像']];
+const LM_COLOR = {tower:'#22d3ee', objective:'#a78bfa', portrait:'#4ade80'};
 
+// 地标一律平铺成可点的方块。以前这里是一个 <select>：
+// 想标的项如果正好是下拉框里当前那一项，点它不会触发 change，
+// pickLm 不跑，LM_ACTIVE 还是空的，拖框就落到了别的项目上 ——
+// 表现就是「防御塔/资源坑/头像根本标不了」。平铺后每个都是独立的点击，没有这个坑。
 function renderLm(){
-  const sel=$('lmSel');
-  const prev=sel.value;
-  sel.innerHTML = LM_PLAN.map(l=>
-    `<option value="${l.name}">${LANDMARKS[l.name]?'✓ ':'○ '}${l.label}</option>`).join('');
-  if(prev) sel.value=prev;
-  LM_ACTIVE = sel.value || LM_PLAN[0].name;
   const done = Object.keys(LANDMARKS).length;
   $('lmPill').className='pill '+(done?'on':'off');
-  $('lmPill').textContent = done ? `已标 ${done} 个` : '未标定';
-  $('lmList').innerHTML = Object.entries(LANDMARKS).map(([n,v])=>{
-    const spec=LM_PLAN.find(l=>l.name===n)||{label:n};
-    return `<div class="ritem ${n===LM_ACTIVE?'on':''}" onclick="pickLm('${n}')">
-      <span>${esc(spec.label)}</span>
-      <span style="color:#5b6373">${v.box.map(b=>b.toFixed(3)).join(', ')}</span></div>`;
-  }).join('') || '<p style="color:#5b6373;font-size:12px;padding:6px">还没标任何地标。</p>';
-  drawOverlay();
+  $('lmPill').textContent = done ? `已标 ${done} / ${LM_PLAN.length} 个` : '未标定';
+
+  $('lmGroups').innerHTML = LM_GROUPS.map(([kind,title])=>{
+    const items = LM_PLAN.filter(l=>l.kind===kind);
+    const got = items.filter(l=>LANDMARKS[l.name]).length;
+    const chips = items.map(l=>{
+      const key = lKey(l.name);
+      const has = !!LANDMARKS[l.name];
+      const cls = ['chip', has?'done':'', l.name===LM_ACTIVE?'on':'', isHidden(key)?'hid':''];
+      return `<span class="${cls.join(' ')}">
+        <button class="pick" onclick="pickLm('${l.name}')">${has?'✓':'○'} ${esc(l.label)}</button>
+        ${eyeBtn(key)}</span>`;
+    }).join('');
+    return `<div class="lmgroup">
+      <div class="lmhead"><span class="name">${title}</span>
+        <span>已标 ${got}/${items.length}</span>
+        <button class="tiny" onclick="setGroupHidden('${kind}',true)">隐藏这组</button>
+        <button class="tiny" onclick="setGroupHidden('${kind}',false)">显示这组</button></div>
+      <div class="chips">${chips}</div></div>`;
+  }).join('');
+  updateNow(); updateHiddenCount(); drawOverlay();
 }
-function pickLm(n){ $('lmSel').value=n; LM_ACTIVE=n; ACTIVE=null; renderRegions(); renderLm();
-  const spec=LM_PLAN.find(l=>l.name===n);
-  $('hint').innerHTML=`正在标地标：<b>${spec?spec.label:n}</b> —— 在画面上把那个图标框起来，框小一点。`; }
-function delLm(){ delete LANDMARKS[LM_ACTIVE]; renderLm(); }
+function pickLm(n){
+  LM_ACTIVE=n; ACTIVE=null;
+  setHidden(lKey(n), false); saveHidden();
+  renderRegions(); renderLm();
+}
+function delLm(){
+  if(!LM_ACTIVE || !LANDMARKS[LM_ACTIVE]){ msg('lmMsg','当前这个地标还没框过，没什么可删的。','err'); return; }
+  const spec=LM_PLAN.find(l=>l.name===LM_ACTIVE);
+  delete LANDMARKS[LM_ACTIVE];
+  msg('lmMsg', `已删掉「${spec?spec.label:LM_ACTIVE}」的框。记得点「保存地标」才会写进文件。`, 'warn');
+  renderLm();
+}
+
+// 当前正在标什么，必须在图的正上方一眼看见 —— 拖框之前唯一要确认的事。
+function updateNow(){
+  const el=$('now');
+  if(ACTIVE){
+    const spec=currentList().find(l=>l[0]===ACTIVE);
+    el.className='now';
+    el.innerHTML=`正在标：<b>${esc(spec?spec[1]:ACTIVE)}</b> —— 在图上拖一个框把它圈起来。`;
+  } else if(LM_ACTIVE){
+    const spec=LM_PLAN.find(l=>l.name===LM_ACTIVE);
+    el.className='now';
+    el.innerHTML=`正在标地标：<b>${esc(spec?spec.label:LM_ACTIVE)}</b> —— 把那个图标框起来，框小一点、贴紧图标。`;
+  } else {
+    el.className='now none';
+    el.textContent='还没选要标的东西 —— 先在右边点一个项目或地标。';
+  }
+}
 
 async function probeLm(){
+  if(!LM_ACTIVE){ msg('lmMsg','先在下面点一个地标。','err'); return; }
   const lm=LANDMARKS[LM_ACTIVE];
   if(!lm){ msg('lmMsg','这个地标还没框过。','err'); return; }
   if(!CURRENT){ msg('lmMsg','先选一张帧图。','err'); return; }
@@ -249,13 +434,14 @@ function fmt(s){ s=Math.max(0,Math.round(s));
 function msg(id,t,k='ok'){ const e=$(id); e.className='msg '+k; e.textContent=t; if(!t) e.className='msg'; }
 
 async function boot() {
+  loadHidden();
   const st = await api('/api/status');
   SPECS = st.regionSpecs || {};
   PROFILES = st.profiles || {};
   loadProfileForMode();
+  MM_DEFAULTS = st.minimapDefaults || {};
   const mm = st.minimap || {};
-  ['blueMinB','blueBOverR','blueBOverG','redMinR','redROverB','redROverG',
-   'minBlobPixels','maxBlobPixels'].forEach(k => { if(mm[k]!==undefined) $(k).value = mm[k]; });
+  MM_KEYS.forEach(k => { if(mm[k]!==undefined) $(k).value = mm[k]; });
   $('mmPill').className = 'pill ' + (mm.verified?'on':'off');
   $('mmPill').textContent = mm.verified ? '已标定' : '未标定';
 
@@ -269,10 +455,9 @@ async function boot() {
   renderRegions(); renderLm();
   if (GAME) loadFrames();
 }
-$('lmSel').addEventListener('change', ()=> pickLm($('lmSel').value));
 $('gameSel').addEventListener('change', ()=>{ GAME=$('gameSel').value; loadFrames(); });
 $('profileMode').addEventListener('change', ()=>{
-  ACTIVE=null; LAST=null; loadProfileForMode(); renderRegions();
+  ACTIVE=null; LAST=null; loadProfileForMode(); renderRegions(); renderLm();
 });
 
 function profileName(){ return $('profileMode').value==='player_pov' ? 'player_pov' : 'kpl_broadcast'; }
@@ -301,14 +486,21 @@ function currentList(){ return $('profileMode').value==='player_pov' ? POV_LIST 
 function renderRegions() {
   $('regions').innerHTML = currentList().map(([k,label,why]) => {
     const has = REGIONS[k];
-    return `<div class="ritem ${ACTIVE===k?'on':''} ${has?'done':''}" onclick="pickRegion('${k}')">
+    const key = rKey(k);
+    return `<div class="ritem ${ACTIVE===k?'on':''} ${has?'done':''} ${isHidden(key)?'hid':''}"
+        onclick="pickRegion('${k}')">
       <span>${has?'✓':'○'} ${label}${why?`<br><span style="color:#5b6373">${why}</span>`:''}</span>
-      <span style="color:#5b6373">${has?has.map(v=>v.toFixed(3)).join(', '):'未标'}</span>
+      <span style="display:flex;align-items:center;gap:4px">
+        <span style="color:#5b6373">${has?has.map(v=>v.toFixed(3)).join(', '):'未标'}</span>
+        ${eyeBtn(key)}</span>
     </div>`; }).join('');
-  drawOverlay();
+  updateNow(); updateHiddenCount(); drawOverlay();
 }
-function pickRegion(k){ ACTIVE=k; LM_ACTIVE=null; renderRegions();
-  $('hint').innerHTML = `正在标定：<b>${currentList().find(l=>l[0]===k)[1]}</b> —— 在图上拖一个框把它圈起来。`; }
+function pickRegion(k){
+  ACTIVE=k; LM_ACTIVE=null;
+  setHidden(rKey(k), false); saveHidden();
+  renderRegions(); renderLm();
+}
 function clearOne(){ if(ACTIVE){ delete REGIONS[ACTIVE]; renderRegions(); } }
 
 async function loadFrames() {
@@ -331,7 +523,13 @@ function pickFrame(i){
 let dragging=false, sx=0, sy=0;
 const stage=$('stage');
 stage.addEventListener('mousedown', e=>{
-  if((!ACTIVE && !LM_ACTIVE) || !$('img').getAttribute('src')) return;
+  if(!$('img').getAttribute('src')) return;
+  if(!ACTIVE && !LM_ACTIVE){
+    // 什么都没选就拖框，以前是静悄悄地什么也不发生，看着像坏了。
+    const el=$('now'); el.className='now none';
+    el.textContent='先在右边点一个项目或地标，再来图上拖框。';
+    return;
+  }
   const r=$('img').getBoundingClientRect();
   dragging=true; sx=(e.clientX-r.left)/r.width; sy=(e.clientY-r.top)/r.height;
   e.preventDefault();
@@ -365,18 +563,21 @@ function drawOverlay(){
   for(const [k,b] of Object.entries(REGIONS)){
     const spec=currentList().find(l=>l[0]===k);
     if(!spec) continue;
-    parts.push(`<div class="box ${k==='minimap'?'mini':''}" style="left:${b[0]*100}%;top:${b[1]*100}%;
-      width:${b[2]*100}%;height:${b[3]*100}%"><b>${spec[1]}</b></div>`);
+    if(isHidden(rKey(k))) continue;
+    parts.push(`<div class="box ${k==='minimap'?'mini':''} ${k===ACTIVE?'cur':''}"
+      style="left:${b[0]*100}%;top:${b[1]*100}%;
+      width:${b[2]*100}%;height:${b[3]*100}%"><b>${esc(spec[1])}</b></div>`);
   }
   for(const [n,v] of Object.entries(LANDMARKS)){
+    if(isHidden(lKey(n))) continue;
     const spec=LM_PLAN.find(l=>l.name===n);
-    const col = spec && spec.kind==='portrait' ? '#4ade80'
-              : spec && spec.kind==='objective' ? '#a78bfa' : '#22d3ee';
-    parts.push(`<div class="box" style="left:${v.box[0]*100}%;top:${v.box[1]*100}%;
+    const col = (spec && LM_COLOR[spec.kind]) || '#22d3ee';
+    parts.push(`<div class="box ${n===LM_ACTIVE?'cur':''}"
+      style="left:${v.box[0]*100}%;top:${v.box[1]*100}%;
       width:${v.box[2]*100}%;height:${v.box[3]*100}%;border-color:${col};
       background:${col}22"></div>`);
   }
-  if(LAST && LAST.usable && REGIONS.minimap){
+  if(LAST && LAST.usable && REGIONS.minimap && !isHidden(rKey('minimap'))){
     const m=REGIONS.minimap;
     for(const side of ['blue','red']) for(const d of LAST[side]){
       parts.push(`<div class="dot" style="left:${(m[0]+d.x*m[2])*100}%;
@@ -396,27 +597,35 @@ async function saveProfile(){
   msg('saveMsg', res.verdict.message, res.verdict.ok?'ok':'warn');
 }
 
+function resetMinimap(){
+  MM_KEYS.forEach(k=>{ if(MM_DEFAULTS[k]!==undefined) $(k).value = MM_DEFAULTS[k]; });
+  msg('mmMsg','已填回出厂默认值。还没生效 —— 点「试一次」看效果，满意再存。','warn');
+}
+
 async function tryMinimap(){
   if(!REGIONS.minimap){ msg('mmMsg','先标定「小地图」那一项。','err'); return; }
   if(!CURRENT){ msg('mmMsg','先选一张帧图。','err'); return; }
   const body = {gameId:GAME, file:CURRENT.file, box:REGIONS.minimap};
-  ['blueMinB','blueBOverR','blueBOverG','redMinR','redROverB','redROverG',
-   'minBlobPixels','maxBlobPixels'].forEach(k=>{ if($(k).value!=='') body[k]=$(k).value; });
+  MM_KEYS.forEach(k=>{ if($(k).value!=='') body[k]=$(k).value; });
   const res = await api('/api/minimap/detect', body);
   if(!res.ok){ msg('mmMsg', res.error, 'err'); LAST=null; drawOverlay(); return; }
   const r = res.result;
   LAST = {blue:r.blue, red:r.red, usable:r.quality.usable};
   drawOverlay();
   const head = `认出蓝方 ${r.blueCount} 个、红方 ${r.redCount} 个，置信度 ${r.quality.confidence}`;
+  const tune = r.blueCount + r.redCount > 10
+    ? '\n认多了：把「至少多亮」「要比…多」几个数字调大（收紧）。'
+    : (r.blueCount + r.redCount < 10
+       ? '\n认少了：把「至少多亮」「要比…多」几个数字调小（放松）；还不行就把「一团最少多少像素」调小。'
+       : '');
   const body2 = r.quality.problems.length ? '\n' + r.quality.problems.map(p=>'· '+p).join('\n') : '';
-  msg('mmMsg', head + body2, r.quality.usable ? 'ok' : 'err');
+  msg('mmMsg', head + body2 + tune, r.quality.usable ? 'ok' : 'err');
   $('mmSave').disabled = !r.quality.usable;
 }
 
 async function saveMinimap(){
   const t={};
-  ['blueMinB','blueBOverR','blueBOverG','redMinR','redROverB','redROverG',
-   'minBlobPixels','maxBlobPixels'].forEach(k=>{ if($(k).value!=='') t[k]=parseInt($(k).value,10); });
+  MM_KEYS.forEach(k=>{ if($(k).value!=='') t[k]=parseInt($(k).value,10); });
   const res = await api('/api/minimap/save', {thresholds:t, verified:true});
   if(!res.ok){ msg('mmMsg', res.error, 'err'); return; }
   $('mmPill').className='pill on'; $('mmPill').textContent='已标定';

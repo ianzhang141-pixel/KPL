@@ -133,6 +133,9 @@ def api_status() -> dict[str, Any]:
         },
         "minimapNote": ocr.minimap_note(),
         "minimap": minimap.load_thresholds(data_dir),
+        # 标定页要能一键回到出厂阈值。load_thresholds 返回的是「默认叠加已保存」，
+        # 拿不回原始默认值，所以这里单独给一份。
+        "minimapDefaults": minimap.default_thresholds(),
         "landmarks": events_cv.load_landmarks(data_dir),
         "sampleTypes": samples.public_types(),
         "seasonRules": season_s44.payload(),
