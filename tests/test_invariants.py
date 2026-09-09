@@ -480,3 +480,59 @@ class StillImageCropping(unittest.TestCase):
                               (0.1, 0.1, 0.5, 0.5))
         self.assertTrue(str(caught.exception).strip(),
                         "抛了异常但没有任何说明，排查时等于没有信息")
+
+
+
+class BuiltinHudMatchesHonorOfKingsLayout(unittest.TestCase):
+    """内置 HUD 坐标必须符合王者荣耀的布局，不是 LOL 的。
+
+    **这一组来自一个真实的错误。** 第一版把小地图放在了**左下角** ——
+    那是 LOL 的习惯（LOL 小地图在右下）。王者荣耀的小地图在**左上角**。
+    用户对着真实画面一眼看出不对：裁出来的是赞助商横幅。
+
+    讽刺的是，这个项目的核心文档就叫《为什么王者荣耀不能照抄LOL》，
+    而我在坐标上照抄了。所以把方位钉死在测试里。
+
+    这里只钉**方位**（哪个角），不钉具体数值 ——
+    具体的框仍然是猜的，必须由人对着真实画面标定。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from kplab import hud
+        cls.regions = hud.builtin_profiles()["kpl_broadcast"]["regions"]
+
+    def test_minimap_is_top_left_not_bottom(self):
+        x, y, w, h = self.regions["minimap"]
+        self.assertLess(y, 0.2, "小地图应该在**上**方 —— 放到下面是 LOL 的习惯")
+        self.assertLess(x, 0.2, "小地图应该在**左**侧")
+
+    def test_economy_panel_is_bottom_centre(self):
+        """用户原话：正式比赛会在屏幕下方中间较长时间展示经济面板。"""
+        for key in ("blueGold", "redGold"):
+            x, y, w, h = self.regions[key]
+            self.assertGreater(y, 0.7, f"{key} 应该在**下**方")
+            self.assertTrue(0.2 < x < 0.8, f"{key} 应该靠**中间**")
+
+    def test_clock_and_score_are_top_centre(self):
+        for key in ("clock", "blueKills", "redKills"):
+            x, y, w, h = self.regions[key]
+            self.assertLess(y, 0.2, f"{key} 应该在上方")
+            self.assertTrue(0.3 < x < 0.7, f"{key} 应该在中间")
+
+    def test_minimap_does_not_overlap_the_score_area(self):
+        """小地图和比分都在上方，但一个靠左一个靠中，不该重叠。"""
+        mx, my, mw, mh = self.regions["minimap"]
+        cx, cy, cw, ch = self.regions["clock"]
+        self.assertLess(mx + mw, cx, "小地图的右边缘伸进了比分区")
+
+    def test_builtin_profile_is_still_marked_uncalibrated(self):
+        """方位改对了，但**具体的框仍然是猜的**，不许标成已标定。
+
+        不同录像源的裁剪、分辨率、有没有加边框都不一样。
+        """
+        from kplab import hud
+        profile = hud.builtin_profiles()["kpl_broadcast"]
+        self.assertFalse(profile.get("calibrated"),
+                         "内置档案被标成已标定了 —— 它只是一组猜测")
+        self.assertIn("猜测", profile.get("note", ""))

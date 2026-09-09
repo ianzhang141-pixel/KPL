@@ -179,6 +179,7 @@ let MINIMAP_BOX = null;   // 标定过的小地图区域，用来把画面坐标
 // 位置的精度：'exact' = 在录像真实小地图上点的；'approx' = 在示意图上目测的。
 // 两者坐标系不同、精度差一个量级，后端据此给完全不同的置信度。
 let POS_PRECISION = 'approx';
+let MINIMAP_CALIBRATED = false;
 
 // 王者峡谷示意图。**这是示意，不是等比复刻** ——
 // 只画确定无疑的结构：双方基地在对角、三条路、中间一条河道。
@@ -412,11 +413,24 @@ function useRealMinimap(){
   $('miniSvg').style.opacity  = ok ? '0' : '1';
   if(ok) $('miniReal').src =
     `/minimap?game=${encodeURIComponent(GAME)}&file=${encodeURIComponent(CURRENT.file)}`;
-  $('precNote').innerHTML = ok
-    ? '正在用<b>录像里的真实小地图</b>（已放大）。在这上面点是<b>精确</b>的。'
-    : '<b>现在点的是示意图，只能得到大概位置。</b>示意图和真实小地图不是等比的，'
+  if (!ok) {
+    $('precNote').innerHTML =
+      '<b>现在点的是示意图，只能得到大概位置。</b>示意图和真实小地图不是等比的，'
       + '没法把录像上的一点对应到示意图的同一点。<br>'
       + '要精确定位：先抽帧，再到<a href="/calibrate">标定页</a>把小地图框出来。';
+  } else if (MINIMAP_CALIBRATED) {
+    $('precNote').innerHTML =
+      '正在用<b>录像里的真实小地图</b>（已放大、已标定）。在这上面点是<b>精确</b>的。';
+  } else {
+    // 最容易出事的一种情况：裁剪成功了，但裁的是错的地方。
+    // 系统看不出来，只有人能看出来 —— 所以必须主动提醒去看一眼。
+    $('precNote').innerHTML =
+      '<b style="color:#fbbf24">⚠️ 上面这块是用「内置的猜测位置」裁出来的，还没有标定过。</b><br>'
+      + '<b>请先看一眼：它是不是真的是小地图？</b>'
+      + '如果裁出来的是记分板、赞助商横幅或者别的东西，'
+      + '说明框的位置不对，<b>在上面点出来的坐标全是错的</b>。<br>'
+      + '框错了就去 <a href="/calibrate">标定页</a> 把小地图重新框一下。';
+  }
 }
 
 function pickFrame(i) {
@@ -496,6 +510,9 @@ loadGames();
   const prof = (st.profiles || {})['kpl_broadcast'];
   const box = (prof || {}).regions && prof.regions.minimap;
   if (box && box.length === 4) MINIMAP_BOX = box;
+  // 标定过没有，决定了下面那段提示的措辞。
+  // **框是猜的时候，「坐标精确」这句话毫无意义** —— 精确 ≠ 正确。
+  MINIMAP_CALIBRATED = !!(prof && prof.calibrated);
   useRealMinimap();
 })();
 </script>

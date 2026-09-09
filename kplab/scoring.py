@@ -352,12 +352,16 @@ def calibrate(games: list[dict[str, Any]],
         if not stats["n"]:
             continue
         rate = stats["blueWins"] / stats["n"]
+        low_ci, high_ci = wilson_interval(stats["blueWins"], stats["n"])
         rows.append({
             "range": f"{lo}~{hi}" if abs(lo) < 900 and abs(hi) < 900
                      else (f"<{hi}" if abs(lo) >= 900 else f">{lo}"),
             "low": lo, "high": hi,
             "frames": stats["n"],
             "blueWinRate": round(rate, 3),
+            "ciLow": round(low_ci, 3),
+            "ciHigh": round(high_ci, 3),
+            "ciWidth": round(high_ci - low_ci, 3),
         })
     rows.sort(key=lambda r: r["low"])
 
@@ -367,6 +371,172 @@ def calibrate(games: list[dict[str, Any]],
         "monotone": _is_monotone(rows),
         "verdict": _calibration_verdict(rows),
     }
+
+
+def wilson_interval(successes: int, trials: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson 置信区间。
+
+    **为什么必须有这个：** 「88% 胜率」这个数字，来自 20 帧和来自 2000 帧
+    是完全不同的两回事，但在表格里长得一模一样。
+    没有区间的校准表会让人对一个由 20 个样本支撑的数字产生不该有的信心。
+
+    用 Wilson 而不是常见的正态近似：样本少或比例接近 0/1 时，
+    正态近似会给出跑到 [0,1] 之外的区间，那种区间只会误导人。
+    """
+    if trials <= 0:
+        return 0.0, 1.0
+    phat = successes / trials
+    denominator = 1 + z * z / trials
+    centre = (phat + z * z / (2 * trials)) / denominator
+    spread = z * math.sqrt(phat * (1 - phat) / trials
+                           + z * z / (4 * trials * trials)) / denominator
+    return max(0.0, centre - spread), min(1.0, centre + spread)
+
+
+# 一个分数档至少要有这么多帧，才允许它参与拟合分数→胜率的映射
+MIN_BIN_FOR_MAPPING = 25
+# 至少要有这么多个够格的档，映射才有形状可言
+MIN_BINS_FOR_MAPPING = 3
+
+
+def _pool_adjacent_violators(points: list[tuple[float, float, int]]) -> list[float]:
+    """保序回归（PAVA）：在保证单调不减的前提下最贴近观测值。
+
+    为什么不直接用观测胜率：某一档因为样本少，胜率可能比相邻的高分档还高，
+    那是噪音不是信号。硬用会得到一条上下起伏的「胜率曲线」，
+    而**胜率随分数差单调递增是这个模型的基本假设** ——
+    要么承认假设，要么承认模型错了，不能两头都要。
+    """
+    values = [p[1] for p in points]
+    weights = [float(p[2]) for p in points]
+    blocks = [[v, w] for v, w in zip(values, weights)]
+    index = 0
+    while index < len(blocks) - 1:
+        if blocks[index][0] <= blocks[index + 1][0]:
+            index += 1
+            continue
+        total_weight = blocks[index][1] + blocks[index + 1][1]
+        merged = (blocks[index][0] * blocks[index][1]
+                  + blocks[index + 1][0] * blocks[index + 1][1]) / total_weight
+        blocks[index] = [merged, total_weight]
+        del blocks[index + 1]
+        if index:
+            index -= 1
+    out: list[float] = []
+    for value, weight in blocks:
+        # 还原成每个原始点一份
+        count = 0
+        remaining = weight
+        for original in points[len(out):]:
+            if remaining <= 0:
+                break
+            out.append(value)
+            remaining -= original[2]
+            count += 1
+        if count == 0:
+            out.append(value)
+    return out[:len(points)]
+
+
+# 数据不够时用的备用斜率。**这是假设，不是学出来的。**
+ASSUMED_LOGISTIC_SLOPE = 0.18
+
+
+def probability_map(games: list[dict[str, Any]],
+                    weights: dict[str, float] | None = None) -> dict[str, Any]:
+    """把「分数差」变成「胜率」—— 这是分数模型能当产品用的最后一步。
+
+    有两种模式，**必须让调用方分得清**：
+
+    - `fitted`  —— 数据够，从校准表里拟合出来的（保序回归，强制单调）
+    - `assumed` —— 数据不够，用一条写死斜率的 logistic 顶着
+
+    `assumed` 模式下的胜率**是假设，不是预测**。
+    和 `model.py` 里基线曲线的处理是同一套规矩：
+    输出必须带 `mode`，界面必须画得不一样。
+    """
+    calibration = calibrate(games, weights)
+    solid = [r for r in calibration["rows"] if r["frames"] >= MIN_BIN_FOR_MAPPING]
+
+    if len(solid) < MIN_BINS_FOR_MAPPING:
+        return {
+            "mode": "assumed",
+            "fitted": False,
+            "slope": ASSUMED_LOGISTIC_SLOPE,
+            "anchors": [],
+            "calibration": calibration,
+            "note": (
+                f"只有 {len(solid)} 个分数档达到 {MIN_BIN_FOR_MAPPING} 帧，"
+                f"少于 {MIN_BINS_FOR_MAPPING} 个，拟合不出映射。\n"
+                f"暂时用斜率 {ASSUMED_LOGISTIC_SLOPE} 的 logistic 顶着 —— "
+                "**这个斜率是拍脑袋定的，产出的胜率是假设不是预测。**"
+            ),
+        }
+
+    centres = [(r["low"] + r["high"]) / 2.0 if abs(r["low"]) < 900 and abs(r["high"]) < 900
+               else (r["high"] - 5.0 if abs(r["low"]) >= 900 else r["low"] + 5.0)
+               for r in solid]
+    points = [(c, r["blueWinRate"], r["frames"]) for c, r in zip(centres, solid)]
+    smoothed = _pool_adjacent_violators(points)
+
+    anchors = [{
+        "scoreDiff": round(centre, 2),
+        "observed": row["blueWinRate"],
+        "fitted": round(value, 4),
+        "frames": row["frames"],
+        "ciLow": row["ciLow"], "ciHigh": row["ciHigh"],
+    } for centre, row, value in zip(centres, solid, smoothed)]
+
+    widest = max(r["ciWidth"] for r in solid)
+    return {
+        "mode": "fitted",
+        "fitted": True,
+        "anchors": anchors,
+        "calibration": calibration,
+        "note": (
+            f"由 {len(solid)} 个分数档拟合（保序回归，强制单调）。\n"
+            f"最宽的一档置信区间有 {widest:.0%} —— "
+            "区间越宽说明那一档的样本越少，读数时要打折扣。\n"
+            "**拟合出来的是「分数差对应的历史胜率」，不是因果。**"
+        ),
+    }
+
+
+def score_to_probability(score_diff: float, mapping: dict[str, Any]) -> dict[str, Any]:
+    """查一个分数差对应的胜率。
+
+    返回里一定带 `mode`。**调用方必须看它** ——
+    `assumed` 模式下这个数字是假设出来的。
+    """
+    if not mapping.get("fitted"):
+        slope = mapping.get("slope", ASSUMED_LOGISTIC_SLOPE)
+        value = 1.0 / (1.0 + math.exp(-max(-60.0, min(60.0, score_diff * slope))))
+        return {"probability": round(value, 4), "mode": "assumed",
+                "interpolated": False,
+                "warning": "这个胜率是用假设斜率算的，不是从数据里学的。"}
+
+    anchors = mapping["anchors"]
+    if score_diff <= anchors[0]["scoreDiff"]:
+        return {"probability": anchors[0]["fitted"], "mode": "fitted",
+                "interpolated": False, "extrapolated": True,
+                "warning": f"分数差 {score_diff:.1f} 低于拟合区间的下界"
+                           f"（{anchors[0]['scoreDiff']:.1f}），取了端点值。"}
+    if score_diff >= anchors[-1]["scoreDiff"]:
+        return {"probability": anchors[-1]["fitted"], "mode": "fitted",
+                "interpolated": False, "extrapolated": True,
+                "warning": f"分数差 {score_diff:.1f} 高于拟合区间的上界"
+                           f"（{anchors[-1]['scoreDiff']:.1f}），取了端点值。"}
+
+    for left, right in zip(anchors, anchors[1:]):
+        if left["scoreDiff"] <= score_diff <= right["scoreDiff"]:
+            span = right["scoreDiff"] - left["scoreDiff"]
+            ratio = 0.0 if span == 0 else (score_diff - left["scoreDiff"]) / span
+            value = left["fitted"] + ratio * (right["fitted"] - left["fitted"])
+            return {"probability": round(value, 4), "mode": "fitted",
+                    "interpolated": True,
+                    "between": [left["scoreDiff"], right["scoreDiff"]]}
+    return {"probability": 0.5, "mode": "fitted", "interpolated": False,
+            "warning": "落在锚点之外，返回 0.5。"}
 
 
 def _is_monotone(rows: list[dict[str, Any]]) -> bool:

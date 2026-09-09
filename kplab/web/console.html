@@ -104,6 +104,38 @@
   .action-help { background:#101824; border:1px solid #29456f; border-radius:8px;
                  padding:10px 12px; margin:10px 0 12px; color:#aab4c4; font-size:12px; }
   .action-help b { color:#dbeafe; }
+  /* 筛选控件直接做在表头上 —— 用户找不到独立的那一行，
+     而表头就是大家会去找筛选的地方。 */
+  .filter-th { position:relative; overflow:visible; }
+  .th-filter { background:none; border:1px solid transparent; color:inherit;
+               font:inherit; font-weight:500; padding:2px 6px; border-radius:5px;
+               cursor:pointer; display:inline-flex; align-items:center; gap:5px; }
+  .th-filter:hover { border-color:#2f3644; background:#1b2029; color:#e6e9ef; }
+  .th-filter .caret { font-size:10px; opacity:.7; }
+  .th-badge { display:none; background:#3b82f6; color:#fff; border-radius:99px;
+              padding:0 6px; font-size:10.5px; line-height:16px; font-weight:600; }
+  .th-badge.on { display:inline-block; }
+  .filter-panel { display:none; position:absolute; top:100%; left:0; z-index:30;
+                  margin-top:6px; min-width:270px; padding:12px 14px;
+                  background:#171b22; border:1px solid #2f3644; border-radius:9px;
+                  box-shadow:0 10px 28px rgba(0,0,0,.55); white-space:normal;
+                  font-weight:400; }
+  .filter-panel.open { display:block; }
+  .filter-panel-head { display:flex; justify-content:space-between; align-items:center;
+                       gap:10px; margin-bottom:9px; }
+  .filter-panel-boxes { display:flex; flex-direction:column; gap:6px; }
+  .sample-chip { display:flex; align-items:center; gap:8px; padding:6px 10px;
+                 border:1px solid #2f3644; border-radius:7px; font-size:12.5px;
+                 cursor:pointer; user-select:none; color:#8b93a1;
+                 background:#171b22; white-space:nowrap; }
+  .sample-chip:hover { border-color:#3b82f6; }
+  .sample-chip.on { border-color:#3b82f6; color:#e6e9ef; background:#1e2a3d; }
+  .sample-chip.empty { opacity:.45; }
+  .sample-chip input { margin:0; accent-color:#3b82f6; }
+  .sample-chip b { font-weight:500; flex:1; }
+  .sample-chip .cnt { color:#5b6373; font-size:11.5px; }
+  .sample-chip.on .cnt { color:#7aa7ff; }
+  button.tiny { padding:3px 9px; font-size:11.5px; }
   .game-controls { display:grid; grid-template-columns:minmax(180px,1fr) minmax(180px,1fr) 150px auto;
                    gap:10px; align-items:end; margin:12px 0; }
   .game-controls button { height:39px; }
@@ -309,7 +341,26 @@
     </div>
     <div class="table-wrap">
       <table class="game-list-table">
-        <thead><tr><th>比赛</th><th>样本类型</th><th>重点对象</th><th>赛事 / 赛季</th><th>帧图</th><th>标注</th><th>观测</th><th>胜负</th><th></th></tr></thead>
+        <thead><tr><th>比赛</th>
+          <th class="filter-th">
+            <button type="button" class="th-filter" id="sampleFilterBtn"
+                    onclick="toggleSamplePanel(event)" title="点这里按样本类型筛选">
+              样本类型 <span id="sampleFilterBadge" class="th-badge"></span>
+              <span class="caret">▾</span>
+            </button>
+            <div class="filter-panel" id="samplePanel">
+              <div class="filter-panel-head">
+                <b>只显示这些类型</b>
+                <span>
+                  <button class="ghost tiny" onclick="setAllSampleTypes(true)">全选</button>
+                  <button class="ghost tiny" onclick="setAllSampleTypes(false)">全不选</button>
+                </span>
+              </div>
+              <div id="sampleTypeFilter" class="filter-panel-boxes"></div>
+              <p class="hint" id="sampleFilterNote" style="margin:8px 0 0"></p>
+            </div>
+          </th>
+          <th>重点对象</th><th>赛事 / 赛季</th><th>帧图</th><th>标注</th><th>观测</th><th>胜负</th><th></th></tr></thead>
         <tbody id="gameRows"><tr><td colspan="9" style="color:#8b93a1">还没有比赛。</td></tr></tbody>
       </table>
     </div>
@@ -787,11 +838,126 @@ function tournamentCell(game) {
   return safe(value);
 }
 
+// 被勾选的样本类型。null = 还没初始化（初始化时默认全选）。
+let sampleTypeSelection = null;
+const SAMPLE_FILTER_KEY = 'kplab.sampleTypeFilter';
+
+function loadSampleSelection(allTypes) {
+  // 记住上次的勾选：只挑职业比赛做的人，不该每次刷新都重勾一遍。
+  // 存在浏览器本地，纯粹是个人便利，读写都要能失败（隐私模式会抛异常）。
+  try {
+    const saved = JSON.parse(localStorage.getItem(SAMPLE_FILTER_KEY) || 'null');
+    if (Array.isArray(saved)) {
+      // 只保留仍然存在的类型，避免旧数据把新类型永久藏起来
+      const kept = saved.filter(v => allTypes.includes(v));
+      if (kept.length) return new Set(kept);
+    }
+  } catch (err) { /* 读不到就用默认 */ }
+  return new Set(allTypes);
+}
+
+function saveSampleSelection() {
+  try {
+    localStorage.setItem(SAMPLE_FILTER_KEY, JSON.stringify([...sampleTypeSelection]));
+  } catch (err) { /* 存不了不影响使用 */ }
+}
+
+function renderSampleTypeFilter() {
+  const types = (STATUS && STATUS.sampleTypes) || [];
+  const games = (STATUS && STATUS.inventory && STATUS.inventory.games) || [];
+  if (!types.length) { $('sampleTypeFilter').innerHTML = ''; return; }
+
+  const allValues = types.map(t => t.value);
+  if (sampleTypeSelection === null) sampleTypeSelection = loadSampleSelection(allValues);
+
+  // 每种类型有几场 —— 一眼看到手上职业比赛有多少，比光有勾选框有用得多
+  const counts = {};
+  for (const g of games) counts[g.sampleType || 'other'] = (counts[g.sampleType || 'other'] || 0) + 1;
+
+  $('sampleTypeFilter').innerHTML = types.map(t => {
+    const n = counts[t.value] || 0;
+    const on = sampleTypeSelection.has(t.value);
+    return `<label class="sample-chip ${on ? 'on' : ''} ${n ? '' : 'empty'}"
+              title="${safe(t.scope || '')}　默认权重 ${t.defaultWeight}">
+      <input type="checkbox" data-value="${safe(t.value)}" ${on ? 'checked' : ''}
+             onchange="toggleSampleType('${safe(t.value)}', this.checked)">
+      <b>${safe(t.label)}</b><span class="cnt">${n}</span></label>`;
+  }).join('');
+
+  refreshSampleChips();
+}
+
+// 勾选时**不重建**整行复选框，只改样式和提示。
+// 重建会把 DOM 元素换掉：焦点丢失、点击手感发顿，
+// 而且下一次点击落在一个已经被替换掉的元素上。
+function refreshSampleChips() {
+  const types = (STATUS && STATUS.sampleTypes) || [];
+  document.querySelectorAll('.sample-chip').forEach(chip => {
+    const box = chip.querySelector('input');
+    if (!box) return;
+    const on = sampleTypeSelection.has(box.dataset.value);
+    box.checked = on;
+    chip.classList.toggle('on', on);
+  });
+  const chosen = sampleTypeSelection.size;
+  // 表头徽章：**列表被筛过时必须看得出来**，
+  // 否则「怎么少了几场」会被当成数据丢了。
+  const badge = $('sampleFilterBadge');
+  if (badge) {
+    const filtering = chosen !== types.length;
+    badge.classList.toggle('on', filtering);
+    badge.textContent = filtering ? `${chosen}/${types.length}` : '';
+  }
+  $('sampleFilterNote').innerHTML = chosen === 0
+    ? '<span class="warn">一个类型都没勾选，下面会是空的。</span>'
+    : chosen === types.length
+      ? '当前显示全部类型。取消勾选可以只看某几类。'
+      : `只显示 ${chosen}/${types.length} 类：` +
+        types.filter(t => sampleTypeSelection.has(t.value))
+             .map(t => safe(t.label)).join('、');
+}
+
+function toggleSamplePanel(event) {
+  if (event) event.stopPropagation();
+  $('samplePanel').classList.toggle('open');
+}
+
+// 点面板外面就收起来。面板里面的点击不能冒泡出去，
+// 否则勾一个就关一次，多选变成了单选。
+document.addEventListener('click', event => {
+  const panel = $('samplePanel');
+  if (!panel || !panel.classList.contains('open')) return;
+  if (panel.contains(event.target)) return;
+  if (event.target.closest && event.target.closest('#sampleFilterBtn')) return;
+  panel.classList.remove('open');
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') { const p = $('samplePanel'); if (p) p.classList.remove('open'); }
+});
+
+function toggleSampleType(value, checked) {
+  if (checked) sampleTypeSelection.add(value); else sampleTypeSelection.delete(value);
+  saveSampleSelection();
+  gameListFilterChanged();
+  refreshSampleChips();
+}
+
+function setAllSampleTypes(on) {
+  const types = (STATUS && STATUS.sampleTypes) || [];
+  sampleTypeSelection = on ? new Set(types.map(t => t.value)) : new Set();
+  saveSampleSelection();
+  gameListFilterChanged();
+  refreshSampleChips();
+}
+
 function renderGameList() {
   const games = (STATUS && STATUS.inventory && STATUS.inventory.games) || [];
   const focusQuery = $('gameFocusFilter').value;
   const tournamentQuery = $('gameTournamentFilter').value;
   const filtered = games.filter(game => {
+    // 样本类型筛选。没初始化时不筛（等 renderSampleTypeFilter 建好再说），
+    // 免得首屏闪一下空列表。
+    if (sampleTypeSelection && !sampleTypeSelection.has(game.sampleType || 'other')) return false;
     const tournamentFields = game.tournament ? [game.tournament] : [game.title, game.gamePatch,
       ...(Array.isArray(game.tags) ? game.tags : [])];
     return matchesGameSearch(focusQuery, [game.focalPlayer, game.focalTeam, game.blueTeam,
@@ -828,6 +994,7 @@ function gameListFilterChanged() { gameListPage = 1; renderGameList(); }
 function gameListPageSizeChanged() { gameListPage = 1; renderGameList(); }
 function changeGamePage(offset) { gameListPage += Number(offset) || 0; renderGameList(); }
 function clearGameFilters() {
+  setAllSampleTypes(true);
   $('gameFocusFilter').value = '';
   $('gameTournamentFilter').value = '';
   gameListPage = 1;
@@ -963,6 +1130,7 @@ async function refresh() {
   sel.innerHTML = inv.games.map(g => `<option value="${g.gameId}">${g.gameId}</option>`).join('');
   if (prev) sel.value = prev;
 
+  renderSampleTypeFilter();
   renderGameList();
 
   $('ruleRows').innerHTML = Object.entries(r.table).map(([k, e]) => `
