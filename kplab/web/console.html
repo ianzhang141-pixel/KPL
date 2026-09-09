@@ -93,6 +93,28 @@
   .season-rule { padding:9px 0; border-top:1px solid #232935; }
   .season-rule b { font-size:13px; }
   .season-rule p { margin:2px 0 0; color:#9aa3b2; font-size:12px; }
+  details.card-collapse { padding:0; }
+  .card-summary { list-style:none; padding:18px 20px; display:flex; align-items:center;
+                  justify-content:space-between; cursor:pointer; color:#e6e9ef; }
+  .card-summary::-webkit-details-marker { display:none; }
+  .card-summary::after { content:'展开'; color:#8b93a1; font-size:12px; font-weight:400; }
+  details.card-collapse[open] > .card-summary::after { content:'收起'; }
+  .card-summary h2 { margin:0; }
+  .card-content { padding:0 20px 18px; }
+  .action-help { background:#101824; border:1px solid #29456f; border-radius:8px;
+                 padding:10px 12px; margin:10px 0 12px; color:#aab4c4; font-size:12px; }
+  .action-help b { color:#dbeafe; }
+  .game-controls { display:grid; grid-template-columns:minmax(180px,1fr) minmax(180px,1fr) 150px auto;
+                   gap:10px; align-items:end; margin:12px 0; }
+  .game-controls button { height:39px; }
+  .table-wrap { overflow-x:auto; }
+  .game-list-table { min-width:920px; }
+  .pagination { display:flex; align-items:center; justify-content:flex-end; gap:8px; margin-top:12px; }
+  .pagination button { padding:6px 12px; }
+  .pagination span { color:#8b93a1; font-size:12px; min-width:180px; text-align:center; }
+  @media (max-width:760px) {
+    .game-controls { grid-template-columns:1fr 1fr; }
+  }
 </style>
 
 <h1>王者荣耀决策实验室 · 数据控制台</h1>
@@ -265,18 +287,40 @@
   </details>
 </div>
 
-<div class="card">
-  <h2><span class="step wait" id="s5">6</span> 比赛清单</h2>
-  <p class="hint">
-    「标注」是人工填的，完全可信；「观测」包含人工和机器识别两种。
-    <b>先标注，再考虑自动识别</b> —— 没有人工标注就无法验证识别准不准。
-  </p>
-  <table>
-    <thead><tr><th>比赛</th><th>样本类型</th><th>重点对象</th><th>帧图</th><th>标注</th><th>观测</th><th>胜负</th><th></th></tr></thead>
-    <tbody id="gameRows"><tr><td colspan="8" style="color:#8b93a1">还没有比赛。</td></tr></tbody>
-  </table>
-  <div class="msg" id="ocrMsg"></div>
-</div>
+<details class="card card-collapse" id="gameListDetails" open>
+  <summary class="card-summary"><h2><span class="step wait" id="s5">6</span> 比赛清单</h2></summary>
+  <div class="card-content">
+    <p class="hint">
+      「标注」是人工填的真值；「观测」包含人工和机器识别两种。
+      建议顺序：人工标注一部分帧 → 自动识别 → 查看准确率 → 核对错误。
+    </p>
+    <div class="action-help">
+      <b>自动识别：</b>让本机OCR读取这场比赛已经保存的证据帧，生成带置信度的机器观测；不会覆盖人工标注，也不会直接训练模型。<br>
+      <b>准确率：</b>把同一帧的机器观测与人工标注逐项比较，报告读出率、完全一致率、可信准确率和可信覆盖率；没有人工标注时无法计算。
+    </div>
+    <div class="game-controls">
+      <div><label>搜索重点对象</label><input type="text" id="gameFocusFilter" placeholder="例如：暖阳、TTG" oninput="gameListFilterChanged()"></div>
+      <div><label>搜索赛事 / 赛季</label><input type="text" id="gameTournamentFilter" placeholder="例如：2026夏季赛" oninput="gameListFilterChanged()"></div>
+      <div><label>每页显示</label><select id="gamePageSize" onchange="gameListPageSizeChanged()">
+        <option value="10" selected>10条</option><option value="20">20条</option>
+        <option value="50">50条</option><option value="100">100条</option>
+      </select></div>
+      <button class="ghost" onclick="clearGameFilters()">清空检索</button>
+    </div>
+    <div class="table-wrap">
+      <table class="game-list-table">
+        <thead><tr><th>比赛</th><th>样本类型</th><th>重点对象</th><th>赛事 / 赛季</th><th>帧图</th><th>标注</th><th>观测</th><th>胜负</th><th></th></tr></thead>
+        <tbody id="gameRows"><tr><td colspan="9" style="color:#8b93a1">还没有比赛。</td></tr></tbody>
+      </table>
+    </div>
+    <div class="pagination">
+      <button class="ghost" id="gamePrevPage" onclick="changeGamePage(-1)">上一页</button>
+      <span id="gamePageInfo">第 1/1 页</span>
+      <button class="ghost" id="gameNextPage" onclick="changeGamePage(1)">下一页</button>
+    </div>
+    <div class="msg" id="ocrMsg"></div>
+  </div>
+</details>
 
 <div class="card">
   <h2>S44 赛季规则库 <span class="pill on" id="seasonBadge">官方说明</span></h2>
@@ -304,24 +348,27 @@
   <div id="knowledgeGroups"></div>
 </div>
 
-<div class="card">
-  <h2>用于自动校验的核心常量</h2>
-  <p class="hint">
-    S44中有明确整数的规则已自动接入；未由本批信息覆盖的项目继续标为“待核对”。
-    这些数值会直接用于发现不可能的识别结果。
-  </p>
-  <table>
-    <thead><tr><th>常量</th><th style="width:110px">值</th><th style="width:90px">状态</th><th></th></tr></thead>
-    <tbody id="ruleRows"></tbody>
-  </table>
-  <div class="msg" id="ruleMsg"></div>
-</div>
+<details class="card card-collapse" id="coreRulesDetails">
+  <summary class="card-summary"><h2>用于自动校验的核心常量</h2></summary>
+  <div class="card-content">
+    <p class="hint">
+      S44中有明确整数的规则已自动接入；未由本批信息覆盖的项目继续标为“待核对”。
+      这些数值会直接用于发现不可能的识别结果。
+    </p>
+    <table>
+      <thead><tr><th>常量</th><th style="width:110px">值</th><th style="width:90px">状态</th><th></th></tr></thead>
+      <tbody id="ruleRows"></tbody>
+    </table>
+    <div class="msg" id="ruleMsg"></div>
+  </div>
+</details>
 
 <script>
 const $ = id => document.getElementById(id);
 let STATUS = null, jobTimer = null, localVideoFiles = [], localVideoUrl = null;
 let sourcePreviewItems = [], sourceCsvText = '';
 let localExtractCancelled = false;
+let gameListPage = 1;
 const sampleWeights = {professional_match:1.5, pro_player_ranked:1.2,
   top_player_ranked:1.0, scrim:1.2, other:0.6};
 
@@ -706,6 +753,87 @@ async function extractBatch() {
 
 function cancelLocalExtract() { localExtractCancelled = true; }
 
+function normalizeGameSearch(text) {
+  return String(text || '').normalize('NFKC').toLowerCase().replace(/[\s\-_/·,，.。:：()（）]+/g, '');
+}
+
+function fuzzyContains(needle, haystack) {
+  if (!needle) return true;
+  if (haystack.includes(needle)) return true;
+  let position = 0;
+  for (const char of haystack) {
+    if (char === needle[position]) position += 1;
+    if (position === needle.length) return true;
+  }
+  return false;
+}
+
+function matchesGameSearch(query, fields) {
+  const rawTerms = String(query || '').trim().split(/[\s,，]+/).filter(Boolean);
+  if (!rawTerms.length) return true;
+  const haystack = normalizeGameSearch(fields.filter(Boolean).join(' '));
+  return rawTerms.every(term => fuzzyContains(normalizeGameSearch(term), haystack));
+}
+
+function tournamentCell(game) {
+  const tournament = String(game.tournament || '');
+  const title = String(game.title || '');
+  const tournamentYear = (tournament.match(/20\d{2}/) || [])[0];
+  const titleYear = (title.match(/20\d{2}/) || [])[0];
+  const value = tournament || title || '—';
+  if (tournamentYear && titleYear && tournamentYear !== titleYear) {
+    return `${safe(value)}<br><span class="warn" title="赛季标签与录像标题年份不一致">⚠ 标题写${safe(titleYear)}年</span>`;
+  }
+  return safe(value);
+}
+
+function renderGameList() {
+  const games = (STATUS && STATUS.inventory && STATUS.inventory.games) || [];
+  const focusQuery = $('gameFocusFilter').value;
+  const tournamentQuery = $('gameTournamentFilter').value;
+  const filtered = games.filter(game => {
+    const tournamentFields = game.tournament ? [game.tournament] : [game.title, game.gamePatch,
+      ...(Array.isArray(game.tags) ? game.tags : [])];
+    return matchesGameSearch(focusQuery, [game.focalPlayer, game.focalTeam, game.blueTeam,
+      game.redTeam, game.gameId]) && matchesGameSearch(tournamentQuery, tournamentFields);
+  });
+  const pageSize = Number($('gamePageSize').value) || 10;
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+  gameListPage = Math.min(Math.max(1, gameListPage), pageCount);
+  const pageGames = filtered.slice((gameListPage - 1) * pageSize, gameListPage * pageSize);
+
+  $('gameRows').innerHTML = pageGames.length ? pageGames.map(g => `
+    <tr>
+      <td><code>${safe(g.gameId)}</code></td>
+      <td><span class="pill ${g.sampleType === 'professional_match' ? 'on' : ''}">${safe(g.sampleTypeLabel)}</span></td>
+      <td>${safe(g.focalPlayer || g.focalTeam || ((g.blueTeam || '?') + ' vs ' + (g.redTeam || '?')))}</td>
+      <td>${tournamentCell(g)}</td>
+      <td>${g.frameImages || '—'}</td>
+      <td class="${g.annotationCount ? 'good' : ''}">${g.annotationCount || '—'}</td>
+      <td>${g.observationCount || '—'}</td>
+      <td>${g.blueWin === true ? '蓝胜' : g.blueWin === false ? '红胜' : '<span class="warn">未记录</span>'}</td>
+      <td>
+        <button class="ghost" title="用本机OCR读取证据帧，生成带置信度的机器观测" onclick="runOcr('${safe(g.gameId)}','${safe(g.sampleType)}')">自动识别</button> ·
+        <button class="ghost" title="将机器观测与同帧人工标注比较；没有标注时无法计算" onclick="showEvaluation('${safe(g.gameId)}')">准确率</button> ·
+        <a href="/annotate?game=${encodeURIComponent(g.gameId)}">标注</a> ·
+        <a href="/debug?game=${encodeURIComponent(g.gameId)}">核对</a>
+      </td>
+    </tr>`).join('') : `<tr><td colspan="9" style="color:#8b93a1">${games.length ? '没有符合检索条件的比赛。' : '还没有比赛。'}</td></tr>`;
+  $('gamePageInfo').textContent = `${filtered.length} 条结果 · 第 ${gameListPage}/${pageCount} 页`;
+  $('gamePrevPage').disabled = gameListPage <= 1;
+  $('gameNextPage').disabled = gameListPage >= pageCount;
+}
+
+function gameListFilterChanged() { gameListPage = 1; renderGameList(); }
+function gameListPageSizeChanged() { gameListPage = 1; renderGameList(); }
+function changeGamePage(offset) { gameListPage += Number(offset) || 0; renderGameList(); }
+function clearGameFilters() {
+  $('gameFocusFilter').value = '';
+  $('gameTournamentFilter').value = '';
+  gameListPage = 1;
+  renderGameList();
+}
+
 async function refresh() {
   STATUS = await api('/api/status');
   $('dataDir').value = STATUS.dataDir;
@@ -835,22 +963,7 @@ async function refresh() {
   sel.innerHTML = inv.games.map(g => `<option value="${g.gameId}">${g.gameId}</option>`).join('');
   if (prev) sel.value = prev;
 
-  $('gameRows').innerHTML = inv.games.length ? inv.games.map(g => `
-    <tr>
-      <td><code>${g.gameId}</code></td>
-      <td><span class="pill ${g.sampleType === 'professional_match' ? 'on' : ''}">${safe(g.sampleTypeLabel)}</span></td>
-      <td>${safe(g.focalPlayer || g.focalTeam || ((g.blueTeam || '?') + ' vs ' + (g.redTeam || '?')))}</td>
-      <td>${g.frameImages || '—'}</td>
-      <td class="${g.annotationCount ? 'good' : ''}">${g.annotationCount || '—'}</td>
-      <td>${g.observationCount || '—'}</td>
-      <td>${g.blueWin === true ? '蓝胜' : g.blueWin === false ? '红胜' : '<span class="warn">未记录</span>'}</td>
-      <td>
-        <button class="ghost" onclick="runOcr('${safe(g.gameId)}','${safe(g.sampleType)}')">自动识别</button> ·
-        <button class="ghost" onclick="showEvaluation('${safe(g.gameId)}')">准确率</button> ·
-        <a href="/annotate?game=${encodeURIComponent(g.gameId)}">标注</a> ·
-        <a href="/debug?game=${encodeURIComponent(g.gameId)}">核对</a>
-      </td>
-    </tr>`).join('') : '<tr><td colspan="8" style="color:#8b93a1">还没有比赛。</td></tr>';
+  renderGameList();
 
   $('ruleRows').innerHTML = Object.entries(r.table).map(([k, e]) => `
     <tr>
