@@ -80,6 +80,8 @@ def default_thresholds() -> dict[str, Any]:
         "maxBlobPixels": 900,
         # 头像逐一匹配的门槛。和上面几个一样是**待标定的起点**，不是查证过的事实。
         "minSimilarity": DEFAULT_MIN_SIMILARITY,
+        # 候选框里至少要有这么多比例的本方队伍色。
+        "minMarkerRatio": DEFAULT_MIN_MARKER_RATIO,
     }
 
 
@@ -121,6 +123,11 @@ def save_thresholds(data_dir: Path, values: dict[str, Any], verified: bool = Tru
             if not 0.3 <= similarity <= 0.99:
                 raise ValueError("相似度门槛只能在 0.30~0.99 之间。")
             table[key] = round(similarity, 4)
+        elif key == "minMarkerRatio":
+            ratio = float(value)
+            if not 0.0 <= ratio <= 0.9:
+                raise ValueError("队伍色占比只能在 0.00~0.90 之间。")
+            table[key] = round(ratio, 4)
         elif isinstance(table[key], bool) or not isinstance(table[key], (int, float)):
             table[key] = value
         else:
@@ -263,6 +270,104 @@ def find_blobs(
 
     blobs.sort(key=lambda b: -b["pixels"])
     return blobs, rejected
+
+
+# 掩码里的第三种取值：**队伍色，但整片大到不可能是英雄标记**（回城/传送特效之类）。
+# 它既不算「本方」也不算「敌方」，而是「这里的颜色证据用不了」。
+OVERSIZE = 3
+
+
+def marker_mask(
+    labels: list[int], width: int, height: int,
+    min_pixels: int, max_pixels: int,
+) -> tuple[list[int], dict[str, int]]:
+    """只保留**大小像一个英雄标记**的连通域，其余一律清零。
+
+    这是从真实录像里学到的三件事的共同答案：
+
+    * **空地。** 草地上一个队伍色像素都没有，掩码里是 0 —— 那里不可能站着人。
+      光靠「长得像头像」去找，草丛纹理迟早会凑出一个像谁的图案。
+    * **回城/传送特效。** 那道紫光柱的 RGB 会被判成蓝色，但它是一条
+      几十上百像素连成一片的东西，超过 maxBlobPixels 就被清掉。
+      它和英雄的区别从来不在颜色，在**大小和形状**。
+    * **守卫、路标之类的小色点。** 小于 minBlobPixels，同样清掉。
+
+    用的就是标定页上那两个「一团最少/最多多少像素」—— 不再多加一套阈值。
+    """
+    mask = [0] * (width * height)
+    stats = {"blue": 0, "red": 0, "tooSmall": 0, "tooLarge": 0,
+             "largestRejectedPixels": 0}
+    seen = [False] * (width * height)
+    for start in range(width * height):
+        team = labels[start]
+        if seen[start] or not team:
+            continue
+        queue = deque([start])
+        seen[start] = True
+        pixels: list[int] = []
+        while queue:
+            index = queue.popleft()
+            pixels.append(index)
+            row, col = divmod(index, width)
+            for nrow, ncol in ((row - 1, col), (row + 1, col),
+                               (row, col - 1), (row, col + 1)):
+                if not (0 <= nrow < height and 0 <= ncol < width):
+                    continue
+                neighbour = nrow * width + ncol
+                if not seen[neighbour] and labels[neighbour] == team:
+                    seen[neighbour] = True
+                    queue.append(neighbour)
+        if len(pixels) < min_pixels:
+            stats["tooSmall"] += 1
+            continue
+        if len(pixels) > max_pixels:
+            stats["tooLarge"] += 1
+            stats["largestRejectedPixels"] = max(stats["largestRejectedPixels"],
+                                                 len(pixels))
+            # 不是简单丢掉，而是标成 OVERSIZE。差别很要紧：
+            # 「这里没有队伍色」和「这里的队伍色被一片特效糊住了」是两回事。
+            # 前者说明那儿没人，后者只说明**这一帧的颜色证据用不了** ——
+            # 一个英雄的圈如果和回城光柱连在一起，直接丢掉就等于把人也丢了。
+            for index in pixels:
+                mask[index] = OVERSIZE
+            continue
+        stats["blue" if team == 1 else "red"] += 1
+        for index in pixels:
+            mask[index] = team
+    return mask, stats
+
+
+def assign_one_to_one(scores: dict[tuple[int, int], float],
+                      slots: list[int]) -> dict[int, int]:
+    """在「一个槽位只能占一个图标、一个图标只能属于一个槽位」下取总分最高的分配。
+
+    以前是**贪心**：分数最高的先挑，挑走别人的图标之后，被抢的那个槽位
+    只好去认第二像的东西 —— 一个错认会连环推倒后面好几个。
+    这里每队只有 5 个槽位，可以按列做 32 个状态的动态规划**求精确最优解**，
+    不需要引入任何库。
+    """
+    if not scores or not slots:
+        return {}
+    columns = sorted({column for _, column in scores})
+    size = len(slots)
+    best: dict[int, tuple[float, dict[int, int]]] = {0: (0.0, {})}
+    for column in columns:
+        updated = dict(best)
+        for mask, (total, chosen) in best.items():
+            for position, slot in enumerate(slots):
+                if mask >> position & 1:
+                    continue
+                score = scores.get((slot, column))
+                if score is None:
+                    continue
+                new_mask = mask | 1 << position
+                new_total = total + score
+                if new_mask not in updated or updated[new_mask][0] < new_total:
+                    updated[new_mask] = (new_total, {**chosen, slot: column})
+        best = updated
+        if len(best) > 1 << size:          # 状态数上限就是 2**5，不会爆
+            best = dict(sorted(best.items(), key=lambda kv: -kv[1][0])[: 1 << size])
+    return max(best.values(), key=lambda item: item[0])[1]
 
 
 # ---------------------------------------------------------------- 对外接口
@@ -470,6 +575,23 @@ def circle_surcharge(circle: float) -> float:
 # 本槽位真正的那个图标如果排在第 7 位，就再也没有机会了。
 SHORTLIST_PER_SLOT = 10
 
+# 候选框里必须有这么大比例的**本方**队伍色（且经过大小筛选）才算一个英雄标记。
+# 真实录像里空地被圈中、回城光柱被当成人，都是因为以前这个门槛形同虚设（0.012）。
+DEFAULT_MIN_MARKER_RATIO = 0.06
+
+# 一个「谁站在哪」的分配方案，比第二好的方案只强这么一点点，就等于没有区分度。
+#
+# 注意衡量的是**整个方案**，不是两个槽位的分数差。同队五个人互相竞争，
+# 单看「6 号和 7 号对这个图标的分数只差 0.02」会把一大半正确结果打成不确定；
+# 而一对一约束本身就是信息：6 号更爱 A、7 号更爱 B，两个都能定下来。
+# 所以判据是：**禁止这一对之后，最优总分掉了多少。**掉得少，说明换成别人也一样，
+# 那就不写号码，只报「这里有一个本方的人」—— 位置是真的，身份不装。
+AMBIGUITY_MARGIN = 0.02
+
+# 圈上有这么大比例被判成 OVERSIZE（特效糊住）时，改为抬门槛而不是直接否决。
+EFFECT_BLOCKED_RATIO = 0.30
+EFFECT_SURCHARGE = 0.05
+
 
 def static_zones_in_minimap(
     minimap_box: tuple[float, float, float, float],
@@ -516,6 +638,7 @@ def match_portraits_detailed(
     min_similarity: float = DEFAULT_MIN_SIMILARITY,
     static_zones: list[tuple[float, float, float, float]] | None = None,
     refine: bool = True,
+    min_marker_ratio: float = DEFAULT_MIN_MARKER_RATIO,
 ) -> dict[str, Any]:
     """逐个把两侧英雄头像与小地图候选图标比较，并说明每个槽位卡在哪一步。
 
@@ -567,17 +690,34 @@ def match_portraits_detailed(
                                    "static": _in_static_zone(cx, cy, static_zones)})
 
     def marker_ratios(cx: int, cy: int, size: int, team_label: int) -> tuple[float, float]:
+        """图标**外圈**上本方 / 敌方队伍色各占多少。
+
+        只看外圈，不看整块。小地图上的英雄标记是「一圈队伍色 + 中间一张脸」，
+        队伍信息**全在那一圈上**；中间那张脸本来就可能是任何颜色 ——
+        一个红方英雄的原画偏蓝，整块里的蓝像素就能压过那一圈红，
+        于是蓝方槽位心安理得地认下了红方的图标。用户看到的「红蓝混合」就是这么来的。
+        """
         if not labels:
-            return 0.0, 0.0
-        half = size // 2
-        hit = any_hit = total = 0
-        for y in range(max(0, cy - half), min(height, cy + half), 2):
-            row = y * width
-            for x in range(max(0, cx - half), min(width, cx + half), 2):
+            return 0.0, 0.0, 0.0
+        # 边框就在半径 = size/2 那一圈上。取样半径必须**卡在边框上**，
+        # 往内一点就采到英雄原画（那是任何颜色都可能的），队伍色就白测了。
+        radii = [size * ratio for ratio in (0.42, 0.47, 0.52, 0.57)]
+        other = 2 if team_label == 1 else 1
+        own = enemy = blocked = total = 0
+        for index in range(48):
+            angle = 2.0 * math.pi * index / 48.0
+            for radius in radii:
+                x = round(cx + math.cos(angle) * radius)
+                y = round(cy + math.sin(angle) * radius)
+                if not (0 <= x < width and 0 <= y < height):
+                    continue
                 total += 1
-                hit += labels[row + x] == team_label
-                any_hit += labels[row + x] in (1, 2)
-        return hit / max(1, total), any_hit / max(1, total)
+                label = labels[y * width + x]
+                own += label == team_label
+                enemy += label == other
+                blocked += label == OVERSIZE
+        return (own / max(1, total), enemy / max(1, total),
+                blocked / max(1, total))
 
     pairs: list[dict[str, Any]] = []
     reports: dict[int, dict[str, Any]] = {}
@@ -656,79 +796,155 @@ def match_portraits_detailed(
                   "markerColourRatio": 0.0, "inStaticZone": False, "needed": min_similarity}
         for item in sorted(best_for_slot, key=lambda i: -i["similarity"]):
             candidate = candidates[item["index"]]
-            team_ratio, marker_ratio = marker_ratios(
+            team_ratio, enemy_ratio, blocked_ratio = marker_ratios(
                 candidate["cx"], candidate["cy"], candidate["size"], team_label)
             needed = (min_similarity
                       + (STATIC_ZONE_MARGIN if candidate["static"] else 0.0)
                       + circle_surcharge(candidate["circle"]))
             score = min(1.0, item["similarity"] + min(0.025, team_ratio * 0.15)
                         + min(0.04, candidate["circle"] * 0.12))
+            # **队伍颜色是硬条件，不是加分项。**
+            # 以前只要求框里有 1.2% 的「任意队伍色」，等于没有要求：
+            # 蓝方槽位可以心安理得地认下一个红色图标，空地也能过关。
+            # 小地图上每个英雄标记都带本方颜色的圈，这是最可靠的一条约束。
+            has_colour = team_ratio >= min_marker_ratio and team_ratio > enemy_ratio
+            # 圈上大部分是「用不了的颜色」时（被特效糊住），不否决，改成抬门槛：
+            # 颜色证据消失不等于人不在，但也确实少了一条独立证据。
+            blocked_out = not has_colour and blocked_ratio >= EFFECT_BLOCKED_RATIO
+            enough_colour = labels is None or has_colour or blocked_out
+            if blocked_out:
+                needed += EFFECT_SURCHARGE
             if score > report["bestScore"]:
                 report.update({"bestScore": round(score, 4),
                                "bestSimilarity": round(item["similarity"], 4),
                                "shapeSimilarity": round(item["shape"], 4),
                                "colourSimilarity": round(item["colour"], 4),
                                "circleScore": candidate["circle"],
-                               "markerColourRatio": round(marker_ratio, 4),
+                               "markerColourRatio": round(team_ratio, 4),
+                               "enemyColourRatio": round(enemy_ratio, 4),
                                "inStaticZone": candidate["static"],
                                "needed": round(needed, 4)})
+                report["blockedColourRatio"] = round(blocked_ratio, 4)
                 report["status"] = (
                     "below_threshold" if score < needed
-                    else "no_team_colour" if labels is not None and marker_ratio < 0.012
+                    else "wrong_team_colour" if not enough_colour and enemy_ratio > team_ratio
+                    else "no_team_colour" if not enough_colour
                     else "candidate")
-            if score < needed:
-                continue
-            # 真实 KPL 帧里阵营边框会被英雄原画、选中框和转播调色覆盖，不能把
-            # 红蓝阈值设成硬门槛。它只作很小的同队加分，主体仍是头像结构比较。
-            if labels is not None and marker_ratio < 0.012:
+            if score < needed or not enough_colour:
                 continue
             pairs.append({"slot": slot, "candidate": item["index"], "score": score,
                           "similarity": item["similarity"],
                           "shapeSimilarity": item["shape"],
                           "colourSimilarity": item["colour"],
                           "circleScore": candidate["circle"],
-                          "markerColourRatio": marker_ratio,
+                          "markerColourRatio": team_ratio,
                           "teamColourRatio": team_ratio,
                           "inStaticZone": candidate["static"]})
         reports[slot] = report
 
-    # 全局贪心一对一分配。同一个小地图头像不能同时冒充两名选手。
-    used_slots: set[int] = set()
-    used_candidates: list[int] = []
+    # 位置几乎重合的候选先并成一个 —— 同一个图标不能既是甲又是乙。
+    groups: dict[int, int] = {}
+    representatives: list[int] = []
+    for pair in sorted(pairs, key=lambda item: -item["score"]):
+        index = pair["candidate"]
+        if index in groups:
+            continue
+        here = candidates[index]
+        for other in representatives:
+            there = candidates[other]
+            if ((here["cx"] - there["cx"]) ** 2 + (here["cy"] - there["cy"]) ** 2
+                    < (min(here["size"], there["size"]) * 0.65) ** 2):
+                groups[index] = other
+                break
+        else:
+            groups[index] = index
+            representatives.append(index)
+
+    # 在**同一块像素**上给每个槽位重新打分。
+    #
+    # 每个槽位都各自做过逐像素微调，落点会差一两个像素；直接拿各自的分数互相比较，
+    # 两个一模一样的头像也能差出 0.05 —— 那不是区分度，是对齐噪声，
+    # 却足以让「其实分不清是谁」被当成「分得很清楚」。
+    best_pair: dict[tuple[int, int], dict[str, Any]] = {}
+    for rep in representatives:
+        candidate = candidates[rep]
+        for slot, (wanted, wanted_structure) in template_desc.items():
+            team_label = 1 if slot <= 5 else 2
+            similarity, colour_similarity, shape_similarity = _pair_score(
+                wanted, wanted_structure, candidate["desc"], candidate["structure"])
+            team_ratio, enemy_ratio, blocked_ratio = marker_ratios(
+                candidate["cx"], candidate["cy"], candidate["size"], team_label)
+            has_colour = team_ratio >= min_marker_ratio and team_ratio > enemy_ratio
+            blocked_out = not has_colour and blocked_ratio >= EFFECT_BLOCKED_RATIO
+            if labels is not None and not (has_colour or blocked_out):
+                continue
+            needed = (min_similarity
+                      + (STATIC_ZONE_MARGIN if candidate["static"] else 0.0)
+                      + circle_surcharge(candidate["circle"])
+                      + (EFFECT_SURCHARGE if blocked_out else 0.0))
+            score = min(1.0, similarity + min(0.025, team_ratio * 0.15)
+                        + min(0.04, candidate["circle"] * 0.12))
+            if score < needed:
+                continue
+            best_pair[(slot, rep)] = {
+                "slot": slot, "candidate": rep, "score": score,
+                "similarity": similarity, "shapeSimilarity": shape_similarity,
+                "colourSimilarity": colour_similarity,
+                "circleScore": candidate["circle"],
+                "markerColourRatio": team_ratio, "teamColourRatio": team_ratio,
+                "inStaticZone": candidate["static"]}
+
+    def assignment_is_ambiguous(scores: dict[tuple[int, int], float],
+                                team_slots: list[int], slot: int, column: int) -> bool:
+        """禁掉这一对之后，最优总分掉得够多吗？掉得少 = 换谁都一样 = 分不清。"""
+        best = sum(scores[(s, c)] for s, c in
+                   assign_one_to_one(scores, team_slots).items())
+        without = {key: value for key, value in scores.items()
+                   if key != (slot, column)}
+        alternative = sum(without[(s, c)] for s, c in
+                          assign_one_to_one(without, team_slots).items())
+        return best - alternative < AMBIGUITY_MARGIN
+
+    # **精确最优的一对一分配**，每队分开做。
+    # 以前是贪心：分数最高的先挑走，被抢的槽位只好去认第二像的东西，
+    # 一个错认会连环推倒后面好几个 —— 用户实测里蓝1、蓝5、红9 同时错位就是这样来的。
     matches: list[dict[str, Any]] = []
-    for pair in sorted(pairs, key=lambda p: -p["score"]):
-        if pair["slot"] in used_slots:
-            continue
-        candidate = candidates[pair["candidate"]]
-        if any((candidate["cx"] - candidates[i]["cx"]) ** 2
-               + (candidate["cy"] - candidates[i]["cy"]) ** 2
-               < (min(candidate["size"], candidates[i]["size"]) * 0.65) ** 2
-               for i in used_candidates):
-            reports[pair["slot"]]["status"] = "taken_by_another_slot"
-            continue
-        used_slots.add(pair["slot"])
-        used_candidates.append(pair["candidate"])
-        reports[pair["slot"]]["status"] = "matched"
-        matches.append({
-            "slot": pair["slot"],
-            "teamId": 100 if pair["slot"] <= 5 else 200,
-            "x": round(candidate["cx"] / width, 4),
-            "y": round(candidate["cy"] / height, 4),
-            "confidence": round(pair["score"], 3),
-            "appearanceSimilarity": round(pair["similarity"], 3),
-            "shapeSimilarity": round(pair["shapeSimilarity"], 3),
-            "colourSimilarity": round(pair["colourSimilarity"], 3),
-            "circleScore": round(pair["circleScore"], 3),
-            "markerColourRatio": round(pair["markerColourRatio"], 3),
-            "teamColourRatio": round(pair["teamColourRatio"], 3),
-            "inStaticZone": bool(pair["inStaticZone"]),
-            "method": "portrait-template",
-        })
+    claimed: set[int] = set()
+    for team_slots in ([s for s in sorted(reports) if s <= 5],
+                       [s for s in sorted(reports) if s > 5]):
+        scores = {key: pair["score"] for key, pair in best_pair.items()
+                  if key[0] in team_slots}
+        for slot, column in sorted(assign_one_to_one(scores, team_slots).items()):
+            pair = best_pair[(slot, column)]
+            if column in claimed:
+                reports[slot]["status"] = "taken_by_another_slot"
+                continue
+            ambiguous = assignment_is_ambiguous(scores, team_slots, slot, column)
+            candidate = candidates[column]
+            claimed.add(column)
+            reports[slot]["status"] = "ambiguous" if ambiguous else "matched"
+            matches.append({
+                "slot": None if ambiguous else slot,
+                "claimedSlot": slot,
+                "teamId": 100 if slot <= 5 else 200,
+                "x": round(candidate["cx"] / width, 4),
+                "y": round(candidate["cy"] / height, 4),
+                "confidence": round(pair["score"], 3),
+                "appearanceSimilarity": round(pair["similarity"], 3),
+                "shapeSimilarity": round(pair["shapeSimilarity"], 3),
+                "colourSimilarity": round(pair["colourSimilarity"], 3),
+                "circleScore": round(pair["circleScore"], 3),
+                "markerColourRatio": round(pair["markerColourRatio"], 3),
+                "teamColourRatio": round(pair["teamColourRatio"], 3),
+                "inStaticZone": bool(pair["inStaticZone"]),
+                "ambiguous": ambiguous,
+                "method": "portrait-template",
+            })
     for slot in template_desc:
         if slot not in reports:
             reports[slot] = {"slot": slot, "teamId": 100 if slot <= 5 else 200,
                              "status": "no_candidate", "bestScore": 0.0}
-    return {"matches": sorted(matches, key=lambda m: m["slot"]),
+    return {"matches": sorted(matches, key=lambda m: m["claimedSlot"]),
             "slots": [reports[slot] for slot in sorted(reports)],
             "candidateCount": len(candidates),
             "staticZoneCandidates": sum(1 for c in candidates if c["static"])}
@@ -742,12 +958,14 @@ def match_portraits(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
 # 每个槽位没认出来的原因，翻译成人话。前端直接照着显示。
 SLOT_STATUS_TEXT = {
     "matched": "已认出",
-    "no_candidate": "整张小地图上没找到任何圆形候选 —— 这个人多半没在场上（阵亡/在泉水）",
+    "ambiguous": "位置找到了，但同队里分不清是谁 —— 只报「这里有一个本方的人」，不写号码",
+    "no_candidate": "整张小地图上没找到本方颜色的圆形候选 —— 这个人多半没在场上（阵亡/在泉水/被特效盖住）",
     "below_threshold": "找到了最像的一块，但分数没到门槛",
     "no_circle": "找到的那块不够像一个有边框的圆形图标",
-    "no_team_colour": "找到的那块里一点阵营颜色都没有",
-    "taken_by_another_slot": "它最像的那块已经被分数更高的另一个人占了",
-    "candidate": "过了门槛但最后没被分配",
+    "no_team_colour": "最像的那块上没有足够的本方队伍色（空地、或者标记被特效盖住了）",
+    "wrong_team_colour": "最像的那块上是**对方**的颜色 —— 已拒绝，不让蓝方认下红方的图标",
+    "taken_by_another_slot": "它最像的那块已经被同队另一个人占了",
+    "candidate": "够得着的那几个位置都被同队分数更高的人占了 —— 他自己那个图标的分数不够，调低门槛也许能救回来",
     "no_template": "这个槽位的侧栏头像还没标定",
 }
 
@@ -764,6 +982,11 @@ def detect_with_portraits(
     thresholds = thresholds or default_thresholds()
     data, width, height = read_rgb(image, box)
     labels = classify_pixels(data, width, height, thresholds)
+    # 只留下**大小像英雄标记**的队伍色团块。空地上没有，回城光柱太大，
+    # 守卫小点太小 —— 这三类在这里就被清掉，后面的头像比对根本看不到它们。
+    marker, marker_stats = marker_mask(labels, width, height,
+                                       int(thresholds["minBlobPixels"]),
+                                       int(thresholds["maxBlobPixels"]))
     templates: dict[int, bytes] = {}
     for slot, portrait_box in portrait_boxes.items():
         try:
@@ -772,8 +995,11 @@ def detect_with_portraits(
             continue
         templates[int(slot)] = raw
     zones = static_zones_in_minimap(box, static_landmark_boxes or [], width, height)
-    detail = match_portraits_detailed(data, width, height, templates, labels,
-                                      min_similarity=min_similarity, static_zones=zones)
+    detail = match_portraits_detailed(
+        data, width, height, templates, marker,
+        min_similarity=min_similarity, static_zones=zones,
+        min_marker_ratio=float(thresholds.get("minMarkerRatio",
+                                              DEFAULT_MIN_MARKER_RATIO)))
     matches = detail["matches"]
     slots = detail["slots"]
     seen = {item["slot"] for item in slots}
@@ -786,7 +1012,13 @@ def detect_with_portraits(
         item["statusText"] = SLOT_STATUS_TEXT.get(item["status"], item["status"])
     blue = [m for m in matches if m["teamId"] == 100]
     red = [m for m in matches if m["teamId"] == 200]
+    named = [m for m in matches if m["slot"] is not None]
     problems: list[str] = []
+    if marker_stats["tooLarge"]:
+        problems.append(
+            f"有 {marker_stats['tooLarge']} 片队伍色区域大到不可能是英雄标记"
+            f"（最大 {marker_stats['largestRejectedPixels']} 像素），已排除。"
+            "回城/传送特效通常就长这样；如果人也跟着少了，说明「一团最多多少像素」调小了。")
     if len(templates) < 10:
         problems.append(f"只标定了 {len(templates)}/10 个两侧英雄头像模板。")
     if not zones and static_landmark_boxes:
@@ -797,6 +1029,10 @@ def detect_with_portraits(
                         "龙的图标可能被认成英雄。标好它们能挡掉这一类误检。")
     if len(matches) < 6:
         problems.append(f"只有 {len(matches)} 个头像通过逐一匹配门槛；其余拒绝输出，避免假点。")
+    if len(matches) > len(named):
+        problems.append(
+            f"有 {len(matches) - len(named)} 个位置**认得出有人、认不出是谁**，"
+            "只按队伍报出来，没有写号码 —— 硬安一个号码只会把错的写进数据里。")
     confidence = (sum(m["confidence"] for m in matches) / len(matches)) if matches else 0.0
     if not thresholds.get("verified"):
         confidence = min(confidence, 0.45)
@@ -804,6 +1040,11 @@ def detect_with_portraits(
     return {
         "blue": blue, "red": red, "blueCount": len(blue), "redCount": len(red),
         "matches": matches, "slots": slots,
+        "namedCount": len(named),
+        "ambiguousCount": len(matches) - len(named),
+        "markerStats": marker_stats,
+        "minMarkerRatio": float(thresholds.get("minMarkerRatio",
+                                               DEFAULT_MIN_MARKER_RATIO)),
         "portraitTemplateCount": len(templates),
         "candidateCount": detail["candidateCount"],
         "staticZoneCandidates": detail["staticZoneCandidates"],
@@ -914,6 +1155,11 @@ def to_observation_players(result: dict[str, Any]) -> dict[str, Any]:
 
     新结果已经通过侧边头像关联槽位，直接保留槽位但在真实样本人工验收前封顶。
     旧颜色结果仍按位置临时排序并砍半，兼容已有数据但不会冒充可信事实。
+
+    **``slot`` 为 None 的匹配（认得出有人、认不出是谁）在这里会被跳过。**
+    观测记录是按槽位建索引的，没有号码就没地方放。这是一个已知的损失：
+    「蓝方有个人在这儿」本身是有用的信息，只是现在的 players 结构装不下它。
+    要留住它得先改观测结构，那是另一次改动 —— 但**绝不能**为了塞进来而随便安一个号码。
     """
     confidence = float((result.get("quality") or {}).get("confidence", 0.0))
     if not result["quality"]["usable"]:

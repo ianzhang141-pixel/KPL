@@ -45,6 +45,8 @@
   .dot { position:absolute; min-width:18px; height:18px; padding:0 3px; border-radius:9px;
          transform:translate(-50%,-50%); border:2px solid #0f1216; pointer-events:none;
          color:#fff; font:bold 10px/14px system-ui; text-align:center; }
+  /* 认得出有人、认不出是谁：画成虚线问号，不写号码 */
+  .dot.anon { border-style:dashed; border-color:#fcd34d; }
   .rlist { max-height:320px; overflow:auto; }
   .ritem { display:flex; justify-content:space-between; align-items:center; gap:8px;
            padding:6px 8px; border-bottom:1px solid #1c212a; font-size:12px; cursor:pointer; }
@@ -247,6 +249,15 @@
 真有人站在龙坑上，头像匹配够强照样认得出来；只是龙本身过不去了。
 没标这几个框的话，这一类误检挡不住。
 
+<b>回城/传送的紫色光柱为什么会被当成人：</b>紫色的蓝色分量也很高
+（大约 R170 G60 B230），蓝−红只有 60，默认门槛 40 就把它放进来了，
+于是一整条光柱变成一片「蓝方颜色」。两个办法，可以一起用：
+　① 把「蓝点：蓝要比红多」<b>调高到 60~90</b>。真正的蓝色标记这个差值通常远大于 100，
+　　 调高挡掉紫色，不会伤到英雄。红方同理，调高「红要比蓝多」挡掉橙红色特效。
+　② 「一团最多多少像素」不要设太大 —— 光柱是连成一整条的，
+　　 超过上限就会被当成特效排除掉（图标外圈被它糊住的人，会自动改用更高的分数门槛，
+　　 不会跟着一起消失）。
+
 怎么调：<b>认出来的人太少 → 把数字调小（放松）；超过 5 个 → 调大（收紧）。</b>
 每改一次都点「试一次」看图上的圆点对不对，对了再点最下面那个按钮存起来。</div>
       </details>
@@ -272,9 +283,14 @@
           <input type="number" id="minSimilarity" step="0.01" min="0.3" max="0.99">
           <p class="help">0.30~0.99，默认 0.80。<b>调低认出的人更多，也开始把地图纹理当人。</b>
             对着真画面调：看下面的表，把门槛卡在「真人」和「不是人」之间。</p></div>
-        <div class="f" style="grid-column:span 2;display:flex;align-items:flex-end">
-          <p class="help" style="margin:0">这个门槛<b>没有在真实录像上校准过</b> ——
-            我给不出一个「正确值」，只能把每个人的实际分数摊开给你看，由你拿真画面定。
+        <div class="f"><label>图标外圈的本方队伍色至少占</label>
+          <input type="number" id="minMarkerRatio" step="0.01" min="0" max="0.9">
+          <p class="help">0~0.90，默认 0.06。英雄标记外面那一圈是队伍色 ——
+            <b>圈上没有本方颜色、或者对方颜色更多，一律拒绝。</b>
+            这是挡住「圈到空地」和「红蓝混认」的那道闸。</p></div>
+        <div class="f" style="display:flex;align-items:flex-end">
+          <p class="help" style="margin:0">这两个门槛<b>都没有在真实录像上校准过</b> ——
+            我给不出「正确值」，只能把每个人的实际分数摊开给你看，由你拿真画面定。
             定完记得点最下面的按钮存起来。</p></div>
       </div>
       <div class="fields" style="margin-top:10px">
@@ -573,6 +589,7 @@ async function boot() {
   const mm = st.minimap || {};
   MM_KEYS.forEach(k => { if(mm[k]!==undefined) $(k).value = mm[k]; });
   if(mm.minSimilarity!==undefined) $('minSimilarity').value = mm.minSimilarity;
+  if(mm.minMarkerRatio!==undefined) $('minMarkerRatio').value = mm.minMarkerRatio;
   else if(st.minimapMinSimilarity!==undefined) $('minSimilarity').value = st.minimapMinSimilarity;
   $('mmPill').className = 'pill ' + (mm.verified?'on':'off');
   $('mmPill').textContent = mm.verified ? '已标定' : '未标定';
@@ -723,8 +740,12 @@ function drawOverlay(){
   if(LAST && LAST.usable && REGIONS.minimap && !isHidden(rKey('minimap'))){
     const m=REGIONS.minimap;
     for(const side of ['blue','red']) for(const d of LAST[side]){
-      parts.push(`<div class="dot" title="槽位 ${d.slot||'?'}，置信度 ${d.confidence||''}" style="left:${(m[0]+d.x*m[2])*100}%;
-        top:${(m[1]+d.y*m[3])*100}%;background:${side==='blue'?'#3b82f6':'#ef4444'}">${d.slot||''}</div>`);
+      const label = d.slot ? d.slot : '?';
+      const tip = d.slot
+        ? `槽位 ${d.slot}，置信度 ${d.confidence||''}`
+        : `${side==='blue'?'蓝方':'红方'}有一个人在这里，但分不清是谁（置信度 ${d.confidence||''}）`;
+      parts.push(`<div class="dot${d.slot?'':' anon'}" title="${esc(tip)}" style="left:${(m[0]+d.x*m[2])*100}%;
+        top:${(m[1]+d.y*m[3])*100}%;background:${side==='blue'?'#3b82f6':'#ef4444'}">${label}</div>`);
     }
   }
   $('overlay').innerHTML=parts.join('');
@@ -743,6 +764,7 @@ async function saveProfile(){
 function resetMinimap(){
   MM_KEYS.forEach(k=>{ if(MM_DEFAULTS[k]!==undefined) $(k).value = MM_DEFAULTS[k]; });
   if(MM_DEFAULTS.minSimilarity!==undefined) $('minSimilarity').value = MM_DEFAULTS.minSimilarity;
+  if(MM_DEFAULTS.minMarkerRatio!==undefined) $('minMarkerRatio').value = MM_DEFAULTS.minMarkerRatio;
   msg('mmMsg','已填回出厂默认值。还没生效 —— 点「试一次」看效果，满意再存。','warn');
 }
 
@@ -754,6 +776,7 @@ async function tryMinimap(){
   const body = {gameId:GAME, file:CURRENT.file, box:REGIONS.minimap};
   MM_KEYS.forEach(k=>{ if($(k).value!=='') body[k]=$(k).value; });
   if($('minSimilarity').value!=='') body.minSimilarity=$('minSimilarity').value;
+  if($('minMarkerRatio').value!=='') body.minMarkerRatio=$('minMarkerRatio').value;
   const res = await api('/api/minimap/detect', body);
   if(!res.ok){ msg('mmMsg', res.error, 'err'); LAST=null; drawOverlay(); return; }
   const r = res.result;
@@ -795,6 +818,8 @@ function renderSlots(r){
       <td class="num">${best?best.toFixed(3):'—'}</td>
       <td class="num">${want.toFixed(2)}</td>
       <td class="num">${gap}</td>
+      <td class="num">${(s.markerColourRatio||0).toFixed(2)}</td>
+      <td class="num">${(s.enemyColourRatio||0).toFixed(2)}</td>
       <td class="why">${esc(s.statusText||s.status)}${s.inStaticZone?'（在龙坑/塔的框里，门槛已调高）':''}</td>
     </tr>`;
   }).join('');
@@ -802,9 +827,13 @@ function renderSlots(r){
   if(r.candidateCount!==undefined) extra.push(`全图找到 ${r.candidateCount} 个圆形候选`);
   if(r.staticZoneCount) extra.push(`${r.staticZoneCount} 个龙坑/塔的框已用于提防误检`);
   if(r.staticZoneCandidates) extra.push(`其中 ${r.staticZoneCandidates} 个候选落在那些框里`);
+  if(r.ambiguousCount) extra.push(`${r.ambiguousCount} 个只报了队伍、没写号码`);
+  const ms = r.markerStats||{};
+  if(ms.tooLarge) extra.push(`${ms.tooLarge} 片队伍色区域大到不像英雄标记（最大 ${ms.largestRejectedPixels} 像素），已按「特效」处理`);
   $('slotReport').innerHTML =
     `<table class="slots"><thead><tr><th>选手</th><th>最好分</th><th>需要</th>
-       <th>还差</th><th>卡在哪一步</th></tr></thead><tbody>${rows}</tbody></table>
+       <th>还差</th><th>本方色</th><th>敌方色</th><th>卡在哪一步</th></tr></thead>
+       <tbody>${rows}</tbody></table>
      <p class="help">${esc(extra.join('；'))}。${nearMiss
        ? ` 黄色那 ${nearMiss} 个是<b>只差一点点分数</b>的 —— 把门槛往下调一点就能认出来，`
          + `但请先看一眼图上那个点是不是真的站着人。`
@@ -815,6 +844,7 @@ async function saveMinimap(){
   const t={};
   MM_KEYS.forEach(k=>{ if($(k).value!=='') t[k]=parseInt($(k).value,10); });
   if($('minSimilarity').value!=='') t.minSimilarity=parseFloat($('minSimilarity').value);
+  if($('minMarkerRatio').value!=='') t.minMarkerRatio=parseFloat($('minMarkerRatio').value);
   const res = await api('/api/minimap/save', {thresholds:t, verified:true});
   if(!res.ok){ msg('mmMsg', res.error, 'err'); return; }
   $('mmPill').className='pill on'; $('mmPill').textContent='已标定';

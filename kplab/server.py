@@ -930,6 +930,15 @@ def api_minimap_detect(body: dict[str, Any]) -> dict[str, Any]:
         if not 0.3 <= min_similarity <= 0.99:
             return {"ok": False, "error": "相似度门槛只能在 0.30~0.99 之间。"}
 
+    if body.get("minMarkerRatio") is not None:
+        try:
+            ratio = float(body["minMarkerRatio"])
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "队伍色占比必须是数字。"}
+        if not 0.0 <= ratio <= 0.9:
+            return {"ok": False, "error": "队伍色占比只能在 0.00~0.90 之间。"}
+        thresholds["minMarkerRatio"] = ratio
+
     try:
         landmarks = events_cv.load_landmarks(data_dir).get("items", {})
         portrait_boxes = {

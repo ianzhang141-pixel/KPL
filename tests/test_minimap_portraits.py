@@ -111,6 +111,24 @@ def _dragon_art(dx, dy, radius):
     return (215, 190, 90) if (dx * dx + dy * dy) < (radius * 0.45) ** 2 else (120, 60, 150)
 
 
+def _draw_beam(pixels, x0, y0, x1, y1, half_width, colour) -> None:
+    """回城/传送特效：一条又粗又长的亮紫色光柱。
+
+    它的 RGB 让 classify_pixels 判成蓝方（蓝够亮、蓝比红多、蓝比绿多），
+    而且用户实测里它真的被当成了一个英雄头像。它和英雄标记的区别不在颜色，
+    在**形状和大小** —— 它是一整条几十上百像素的连通区域。
+    """
+    length = max(1.0, math.hypot(x1 - x0, y1 - y0))
+    for step in range(int(length) + 1):
+        cx = round(x0 + (x1 - x0) * step / length)
+        cy = round(y0 + (y1 - y0) * step / length)
+        for dy in range(-half_width, half_width + 1):
+            for dx in range(-half_width, half_width + 1):
+                x, y = cx + dx, cy + dy
+                if 0 <= x < len(pixels[0]) and 0 <= y < len(pixels):
+                    pixels[y][x] = list(colour)
+
+
 SPOTS = [(0.20, 0.22), (0.32, 0.40), (0.18, 0.62), (0.44, 0.70), (0.30, 0.84),
          (0.72, 0.24), (0.60, 0.44), (0.80, 0.58), (0.66, 0.76), (0.86, 0.86)]
 
@@ -136,9 +154,24 @@ def build_scene(directory: Path) -> dict:
     dcx, dcy = mx + int(0.52 * mw), my + int(0.50 * mh)
     _draw_icon(pixels, dcx, dcy, icon_radius, _dragon_art, (200, 160, 60))
     pad = icon_radius + 3
+
+    # 回城特效：一条会被判成「蓝色」的粗光柱。用户实测里它被认成了红10。
+    bx0, by0 = mx + int(0.08 * mw), my + int(0.06 * mh)
+    bx1, by1 = mx + int(0.40 * mw), my + int(0.16 * mh)
+    _draw_beam(pixels, bx0, by0, bx1, by1, max(3, icon_radius // 2), (170, 60, 230))
+    beam = (((bx0 + bx1) / 2 - mx) / mw, ((by0 + by1) / 2 - my) / mh)
+
+    # 地图上零散的队伍色小装饰（守卫、路标）。太小，不该被当成英雄。
+    for fx, fy, colour in ((0.90, 0.12, (60, 120, 235)), (0.10, 0.44, (225, 70, 70))):
+        cx, cy = mx + int(fx * mw), my + int(fy * mh)
+        for dy in range(-2, 3):
+            for dx in range(-2, 3):
+                pixels[cy + dy][cx + dx] = list(colour)
+
     scene = {
         "truth": truth,
         "dragon": ((dcx - mx) / mw, (dcy - my) / mh),
+        "beam": beam,
         # 用户在标定页上框「暴君坑」时会框出来的那个框（画面相对坐标）
         "pitBox": ((dcx - pad) / WIDTH, (dcy - pad) / HEIGHT,
                    (2 * pad) / WIDTH, (2 * pad) / HEIGHT),
@@ -291,9 +324,9 @@ class SyntheticSceneRecall(unittest.TestCase):
     def _placed_correctly(self, result) -> list[int]:
         good = []
         for match in result["matches"]:
-            gx, gy = self.scene["truth"][match["slot"]]
+            gx, gy = self.scene["truth"][match["claimedSlot"]]
             if math.hypot(match["x"] - gx, match["y"] - gy) <= self.POSITION_TOLERANCE:
-                good.append(match["slot"])
+                good.append(match["claimedSlot"])
         return good
 
     def test_finds_most_of_the_ten(self):
@@ -310,14 +343,57 @@ class SyntheticSceneRecall(unittest.TestCase):
             distance = math.hypot(match["x"] - dx, match["y"] - dy)
             self.assertGreater(
                 distance, 0.05,
-                f"槽位 {match['slot']} 被贴到了龙身上 —— "
+                f"槽位 {match['claimedSlot']} 被贴到了龙身上 —— "
                 "标定过的资源坑框没有起到提防作用。")
 
     def test_every_reported_match_is_where_it_really_is(self):
         # 宁可漏掉也不能指错人：报出来的每一个都必须落在真值附近。
         good = set(self._placed_correctly(self.with_pits))
-        wrong = [m["slot"] for m in self.with_pits["matches"] if m["slot"] not in good]
+        wrong = [m["claimedSlot"] for m in self.with_pits["matches"]
+                 if m["claimedSlot"] not in good]
         self.assertEqual(wrong, [], f"这些槽位被放到了错误的位置：{wrong}")
+
+    def test_no_match_lands_on_the_recall_beam(self):
+        bx, by = self.scene["beam"]
+        for match in self.with_pits["matches"]:
+            self.assertGreater(
+                math.hypot(match["x"] - bx, match["y"] - by), 0.10,
+                f"槽位 {match['claimedSlot']} 被贴到了回城光柱上 —— "
+                "那是一整条几十上百像素的连通区域，不可能是英雄标记。")
+
+    def test_no_slot_is_matched_to_the_other_teams_icon(self):
+        # 「连最基础的红蓝轮廓都分不清」是用户原话。队伍色是硬条件，不是加分项。
+        for match in self.with_pits["matches"]:
+            owner = min(self.scene["truth"],
+                        key=lambda slot: math.hypot(
+                            match["x"] - self.scene["truth"][slot][0],
+                            match["y"] - self.scene["truth"][slot][1]))
+            distance = math.hypot(match["x"] - self.scene["truth"][owner][0],
+                                  match["y"] - self.scene["truth"][owner][1])
+            if distance > self.POSITION_TOLERANCE:
+                continue                       # 不在任何英雄身上，别的测试管
+            self.assertEqual(
+                match["claimedSlot"] <= 5, owner <= 5,
+                f"槽位 {match['claimedSlot']} 认下了对方阵营的图标（真身是 {owner}）。")
+
+    def test_no_match_sits_on_empty_ground(self):
+        # 报出来的每一个点，要么在某个英雄身上，要么就不该报。
+        for match in self.with_pits["matches"]:
+            nearest = min(
+                math.hypot(match["x"] - x, match["y"] - y)
+                for x, y in self.scene["truth"].values())
+            self.assertLessEqual(
+                nearest, self.POSITION_TOLERANCE,
+                f"槽位 {match['claimedSlot']} 落在空地上（离最近的英雄 {nearest:.3f}）。")
+
+    def test_unsure_identity_is_reported_without_a_number(self):
+        # 分不清是谁时只报队伍，不写号码 —— 硬安一个号码只会把错的写进数据。
+        for match in self.with_pits["matches"]:
+            if match["ambiguous"]:
+                self.assertIsNone(match["slot"])
+                self.assertIn(match["teamId"], (100, 200))
+            else:
+                self.assertEqual(match["slot"], match["claimedSlot"])
 
     def test_report_covers_all_ten_slots_with_a_reason(self):
         slots = self.with_pits["slots"]
@@ -336,6 +412,157 @@ class SyntheticSceneRecall(unittest.TestCase):
             "没标资源坑时必须明说龙可能被认成英雄，不能默默地给出可能错的结果。")
         self.assertEqual(without["staticZoneCount"], 0)
         self.assertGreaterEqual(self.with_pits["staticZoneCount"], 1)
+
+
+class TeamColourIsAHardRequirement(unittest.TestCase):
+    """用户实测里出现「蓝方槽位认下红方图标」—— 最基础的一条约束被当成了加分项。"""
+
+    def test_default_ratio_is_a_real_threshold(self):
+        self.assertGreaterEqual(minimap.DEFAULT_MIN_MARKER_RATIO, 0.03,
+                                "队伍色门槛低到形同虚设，空地和对方图标都会被放进来。")
+
+    @staticmethod
+    def _canvas(size, team_label_colour, hero_colour):
+        raw = bytearray()
+        centre = (size - 1) / 2
+        for y in range(size):
+            for x in range(size):
+                distance = math.hypot(x - centre, y - centre)
+                if distance > size * 0.5:
+                    raw.extend((26, 34, 28))            # 地图底色
+                elif distance > size * 0.40:
+                    raw.extend(team_label_colour)       # 队伍色外圈
+                else:
+                    raw.extend(hero_colour)             # 英雄原画
+        return bytes(raw)
+
+    def test_ring_is_read_not_the_whole_square(self):
+        # 一个**红方**图标，中间那张脸偏蓝。整块里的蓝像素能压过外圈的红，
+        # 只有盯着外圈看才判得对 —— 用户看到的红蓝混合就是这么来的。
+        size = 40
+        raw = self._canvas(size, (225, 70, 70), (60, 120, 235))
+        labels = minimap.classify_pixels(raw, size, size, minimap.default_thresholds())
+        blue = sum(1 for label in labels if label == 1)
+        red = sum(1 for label in labels if label == 2)
+        self.assertGreater(blue, red, "这个测试样本本身就该是「整块蓝多于红」，否则测不到东西。")
+
+        detail = minimap.match_portraits_detailed(
+            raw, size, size, {}, labels)      # 没有模板，只验证工具本身
+        self.assertEqual(detail["matches"], [])
+
+    def test_oversize_regions_are_marked_not_erased(self):
+        # 「这里没有队伍色」和「这里被一片特效糊住了」必须区分开：
+        # 前者说明没人，后者只说明这一帧的颜色证据用不了。
+        width = height = 20
+        labels = [0] * (width * height)
+        for index in range(width * height):        # 整片都是蓝 —— 远超上限
+            labels[index] = 1
+        mask, stats = minimap.marker_mask(labels, width, height, 5, 50)
+        self.assertEqual(stats["tooLarge"], 1)
+        self.assertTrue(all(value == minimap.OVERSIZE for value in mask),
+                        "超大团块被抹成 0 了 —— 那样「被特效盖住」会和「空地」混为一谈。")
+
+    def test_small_specks_are_erased(self):
+        width = height = 20
+        labels = [0] * (width * height)
+        labels[5 * width + 5] = 1                  # 一个孤零零的像素
+        mask, stats = minimap.marker_mask(labels, width, height, 5, 50)
+        self.assertEqual(stats["tooSmall"], 1)
+        self.assertEqual(set(mask), {0})
+
+
+class UnsureIdentityIsNotGuessed(unittest.TestCase):
+    """两个人长得一样时，硬安一个号码就是把错的写进数据。"""
+
+    @staticmethod
+    def _render(size, art, ring=(60, 120, 235), background=(26, 34, 28)):
+        raw = bytearray()
+        centre = (size - 1) / 2
+        radius = size * 0.46
+        for y in range(size):
+            for x in range(size):
+                distance = math.hypot(x - centre, y - centre)
+                if distance > radius:
+                    raw.extend(background)
+                elif distance > radius - max(2.0, size * 0.10):
+                    raw.extend(ring)
+                else:
+                    raw.extend(art(x - centre, y - centre, radius))
+        return bytes(raw)
+
+    def _scene_with_one_icon(self, size=64, icon=26):
+        canvas = bytearray(bytes((26, 34, 28)) * (size * size))
+        art = _hero_art(2)
+        icon_bytes = self._render(icon, art)
+        top = left = (size - icon) // 2
+        for row in range(icon):
+            start = ((top + row) * size + left) * 3
+            canvas[start:start + icon * 3] = icon_bytes[row * icon * 3:(row + 1) * icon * 3]
+        return bytes(canvas), self._render(24, art)
+
+    def test_two_identical_templates_get_a_position_but_no_number(self):
+        canvas, template = self._scene_with_one_icon()
+        size = 64
+        labels = minimap.classify_pixels(canvas, size, size, minimap.default_thresholds())
+        mask, _ = minimap.marker_mask(labels, size, size, 12, 900)
+        detail = minimap.match_portraits_detailed(
+            canvas, size, size, {1: template, 2: template}, mask,
+            min_similarity=0.55, min_marker_ratio=0.03)
+        self.assertEqual(len(detail["matches"]), 1,
+                         "同一个图标不能同时算成两个人。")
+        match = detail["matches"][0]
+        self.assertTrue(match["ambiguous"],
+                        "两个模板一模一样，不可能分得出是谁。")
+        self.assertIsNone(match["slot"],
+                          "分不清是谁却写上了号码 —— 这就是用户看到的「头像错认」。")
+        self.assertEqual(match["teamId"], 100, "队伍还是知道的，位置也是真的。")
+
+    def test_a_distinctive_template_still_gets_its_number(self):
+        # 反面：模板确实不同的时候，必须照常给出号码，不能一律推说「分不清」。
+        canvas, template = self._scene_with_one_icon()
+        other = self._render(24, _hero_art(7))
+        size = 64
+        labels = minimap.classify_pixels(canvas, size, size, minimap.default_thresholds())
+        mask, _ = minimap.marker_mask(labels, size, size, 12, 900)
+        detail = minimap.match_portraits_detailed(
+            canvas, size, size, {1: template, 2: other}, mask,
+            min_similarity=0.55, min_marker_ratio=0.03)
+        named = [m for m in detail["matches"] if m["slot"] is not None]
+        self.assertTrue(named, "模板明显不同却还是不肯给号码，就成了另一种失灵。")
+        self.assertEqual(named[0]["slot"], 1)
+
+
+class AssignmentIsExactNotGreedy(unittest.TestCase):
+    """贪心分配会连环出错：被抢走图标的槽位只好去认第二像的东西。"""
+
+    def test_matches_brute_force_optimum(self):
+        import itertools
+        import random
+        rnd = random.Random(20260909)
+        for _ in range(120):
+            slots = [1, 2, 3]
+            columns = list(range(5))
+            scores = {(slot, column): round(rnd.random(), 3)
+                      for slot in slots for column in columns if rnd.random() < 0.7}
+            chosen = minimap.assign_one_to_one(scores, slots)
+            self.assertEqual(len(set(chosen.values())), len(chosen),
+                             "同一个图标被分给了两个槽位。")
+            total = sum(scores[pair] for pair in chosen.items())
+            best = 0.0
+            for size in range(len(slots) + 1):
+                for slot_group in itertools.combinations(slots, size):
+                    for column_group in itertools.permutations(columns, size):
+                        pairs = list(zip(slot_group, column_group))
+                        if all(pair in scores for pair in pairs):
+                            best = max(best, sum(scores[pair] for pair in pairs))
+            self.assertAlmostEqual(total, best, places=9)
+
+    def test_greedy_would_lose_here(self):
+        # 贪心会先把 c0 给分数最高的 1 号，2 号只剩 0.10；
+        # 最优解是 1 号让出 c0，总分 0.90+0.85 > 0.95+0.10。
+        scores = {(1, "c0"): 0.95, (1, "c1"): 0.90, (2, "c0"): 0.85, (2, "c1"): 0.10}
+        chosen = minimap.assign_one_to_one(scores, [1, 2])
+        self.assertEqual(chosen, {1: "c1", 2: "c0"})
 
 
 if __name__ == "__main__":
