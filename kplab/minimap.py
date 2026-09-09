@@ -14,15 +14,11 @@
 
 ## 这一版做什么、不做什么
 
-**做：** 认出小地图上有几个蓝色标记、几个红色标记，各自在哪。
-**不做：** 认出那个蓝点具体是哪个英雄。
+第一阶段只用颜色找蓝红色块；真实 KPL 帧证明这种办法会把道路、塔和装饰当人。
+当前改为两阶段：颜色只生成弱候选，随后把左右十个已标定头像逐一与小地图
+多尺度圆形候选比较。相似度、圆形边界或人工核验不过关就不输出，宁可缺人。
 
-这个区分是刻意的，也是诚实的。
-区分英雄需要头像模板库、要处理遮挡和缩放，是另一个量级的工作。
-而「蓝方有 3 个人在上半区」这种信息，光靠颜色和位置就能得出，
-已经能回答一部分问题了 —— 先把能做的做扎实。
-
-**所以本模块永远不会给出 heroName。** 它只说「这里有一个蓝方标记」。
+输出的是 1~10 号槽位，不根据上下位置硬猜，也不凭图像编造英雄名称。
 
 ## 怎么在不装任何 Python 包的前提下处理图像
 
@@ -46,6 +42,7 @@ ffmpeg 本来就是抽帧要用的，不引入新东西。
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 from collections import deque
 from pathlib import Path
@@ -252,8 +249,8 @@ def detect(
 ) -> dict[str, Any]:
     """在一张画面上找出小地图标记。
 
-    返回结果里**没有 heroName** —— 本模块认不出是哪个英雄，
-    也不会假装认得出。它只说「这里有一个蓝方标记」。
+    兼容的颜色候选接口。正式标定页在有十个侧边头像时使用
+    ``detect_with_portraits()``，本函数不负责槽位关联。
     """
     thresholds = thresholds or default_thresholds()
     data, width, height = read_rgb(image, box)
@@ -279,6 +276,272 @@ def detect(
             len(blue), len(red), bool(thresholds.get("verified")),
             blue_rejected, red_rejected, coloured / total_pixels,
         ),
+    }
+
+
+# ---------------------------------------------------------------- 头像模板关联
+
+def appearance_descriptor(data: bytes, width: int, height: int,
+                          grid: int = 4) -> list[float]:
+    """把头像压成分区色彩描述子，用于跨尺寸比较。
+
+    每格保存归一化 RGB 与亮度。归一化色彩降低了转播压缩和明暗变化的影响，
+    分区又保留了发色、肤色、盔甲等大致空间关系。它不是人脸识别模型；低于门槛
+    的匹配会被拒绝，不能为了凑齐十个人而硬分配。
+    """
+    if not data or width <= 0 or height <= 0:
+        return []
+    out: list[float] = []
+    for gy in range(grid):
+        y0, y1 = gy * height // grid, max(gy * height // grid + 1, (gy + 1) * height // grid)
+        for gx in range(grid):
+            x0, x1 = gx * width // grid, max(gx * width // grid + 1, (gx + 1) * width // grid)
+            tr = tg = tb = count = 0
+            for y in range(y0, min(height, y1)):
+                for x in range(x0, min(width, x1)):
+                    base = (y * width + x) * 3
+                    tr += data[base]
+                    tg += data[base + 1]
+                    tb += data[base + 2]
+                    count += 1
+            if not count:
+                out.extend((0.0, 0.0, 0.0, 0.0))
+                continue
+            r, g, b = tr / count, tg / count, tb / count
+            total = max(1.0, r + g + b)
+            out.extend((r / total, g / total, b / total, max(r, g, b) / 255.0))
+    return out
+
+
+def descriptor_similarity(left: list[float], right: list[float]) -> float:
+    if not left or len(left) != len(right):
+        return 0.0
+    distance = (sum((a - b) ** 2 for a, b in zip(left, right)) / len(left)) ** 0.5
+    return round(max(0.0, 1.0 - distance / 0.42), 4)
+
+
+def structure_descriptor(data: bytes, width: int, height: int,
+                         grid: int = 8) -> list[float]:
+    """归一化灰度结构，区分英雄脸部轮廓与普通地图纹理。"""
+    if not data or width <= 0 or height <= 0:
+        return []
+    values: list[float] = []
+    for gy in range(grid):
+        y0, y1 = gy * height // grid, max(gy * height // grid + 1, (gy + 1) * height // grid)
+        for gx in range(grid):
+            x0, x1 = gx * width // grid, max(gx * width // grid + 1, (gx + 1) * width // grid)
+            total = count = 0.0
+            for y in range(y0, min(height, y1)):
+                for x in range(x0, min(width, x1)):
+                    base = (y * width + x) * 3
+                    total += data[base] * 0.299 + data[base + 1] * 0.587 + data[base + 2] * 0.114
+                    count += 1
+            values.append(total / max(1.0, count))
+    mean = sum(values) / len(values)
+    deviation = (sum((v - mean) ** 2 for v in values) / len(values)) ** 0.5
+    if deviation < 1.0:
+        return [0.0] * len(values)
+    return [(v - mean) / deviation for v in values]
+
+
+def structure_similarity(left: list[float], right: list[float]) -> float:
+    if not left or len(left) != len(right):
+        return 0.0
+    correlation = sum(a * b for a, b in zip(left, right)) / len(left)
+    return round(max(0.0, min(1.0, (correlation + 1.0) / 2.0)), 4)
+
+
+def _crop_bytes(data: bytes, width: int, height: int,
+                cx: int, cy: int, size: int) -> tuple[bytes, int, int]:
+    half = max(2, size // 2)
+    x0, x1 = max(0, cx - half), min(width, cx + half)
+    y0, y1 = max(0, cy - half), min(height, cy + half)
+    out = bytearray()
+    for y in range(y0, y1):
+        start = (y * width + x0) * 3
+        out.extend(data[start:start + (x1 - x0) * 3])
+    return bytes(out), x1 - x0, y1 - y0
+
+
+def radial_edge_score(data: bytes, width: int, height: int,
+                      cx: int, cy: int, size: int) -> float:
+    """头像是有闭合边框的小圆标；道路/草丛通常没有一整圈径向边缘。"""
+    inner = max(2.0, size * 0.27)
+    outer = max(inner + 1.0, size * 0.50)
+    distances: list[float] = []
+    for index in range(20):
+        angle = 2.0 * math.pi * index / 20.0
+        points = []
+        for radius in (inner, outer):
+            x = min(width - 1, max(0, round(cx + math.cos(angle) * radius)))
+            y = min(height - 1, max(0, round(cy + math.sin(angle) * radius)))
+            base = (y * width + x) * 3
+            points.append((data[base], data[base + 1], data[base + 2]))
+        distance = sum((points[0][i] - points[1][i]) ** 2 for i in range(3)) ** 0.5 / 441.67
+        distances.append(distance)
+    strong = sum(1 for d in distances if d >= 0.08) / len(distances)
+    return round((sum(distances) / len(distances)) * 0.55 + strong * 0.45, 4)
+
+
+def match_portraits(
+    map_data: bytes,
+    width: int,
+    height: int,
+    portrait_templates: dict[int, bytes],
+    labels: list[int] | None = None,
+    min_similarity: float = 0.80,
+) -> list[dict[str, Any]]:
+    """逐个把两侧英雄头像与小地图候选图标比较。
+
+    候选点来自整张小地图的多尺度滑窗，不再把红蓝色块中心直接当英雄位置。
+    队伍颜色只作为弱佐证；最终必须通过对应槽位头像的外观匹配。
+    """
+    if not portrait_templates:
+        return []
+    template_desc = {
+        int(slot): (appearance_descriptor(raw, 24, 24),
+                    structure_descriptor(raw, 24, 24))
+        for slot, raw in portrait_templates.items()
+        if raw and len(raw) >= 24 * 24 * 3
+    }
+    if not template_desc:
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    step = max(3, width // 40)
+    # KPL 720p 转播的小地图头像缩到 160×160 后通常仍有约 17~29px。
+    # 旧版只搜到 10~17px，实际等于在头像内部找一小块，极易匹配到地图纹理。
+    sizes = sorted({max(14, width // 9), max(18, width // 8),
+                    max(22, width // 6), max(26, round(width / 5.5))})
+    for size in sizes:
+        margin = size // 2
+        for cy in range(margin, height - margin, step):
+            for cx in range(margin, width - margin, step):
+                crop, cw, ch = _crop_bytes(map_data, width, height, cx, cy, size)
+                desc = appearance_descriptor(crop, cw, ch)
+                # 平坦地图底纹不可能是头像；先用描述子的亮度分区变化做廉价筛选。
+                values = desc[3::4]
+                texture = max(values, default=0.0) - min(values, default=0.0)
+                if texture < 0.055:
+                    continue
+                circle = radial_edge_score(map_data, width, height, cx, cy, size)
+                if circle < 0.42:
+                    continue
+                candidates.append({"cx": cx, "cy": cy, "size": size,
+                                   "desc": desc,
+                                   "structure": structure_descriptor(crop, cw, ch),
+                                   "texture": texture, "circle": circle})
+
+    pairs: list[dict[str, Any]] = []
+    for slot, wanted_pair in template_desc.items():
+        wanted, wanted_structure = wanted_pair
+        team_label = 1 if slot <= 5 else 2
+        best_for_slot: list[dict[str, Any]] = []
+        for index, candidate in enumerate(candidates):
+            colour_similarity = descriptor_similarity(wanted, candidate["desc"])
+            shape_similarity = structure_similarity(wanted_structure, candidate["structure"])
+            similarity = 0.35 * colour_similarity + 0.65 * shape_similarity
+            if similarity < min_similarity or candidate["circle"] < 0.48:
+                continue
+            # 候选框内确实有本方颜色时最多加 0.06；没有也不直接拒绝，避免头像边框
+            # 被压缩或技能特效改变颜色后整个人消失。
+            team_ratio = 0.0
+            marker_ratio = 0.0
+            if labels:
+                cx, cy, size = candidate["cx"], candidate["cy"], candidate["size"]
+                half = size // 2
+                hit = any_hit = total = 0
+                for y in range(max(0, cy-half), min(height, cy+half), 2):
+                    for x in range(max(0, cx-half), min(width, cx+half), 2):
+                        total += 1
+                        hit += labels[y * width + x] == team_label
+                        any_hit += labels[y * width + x] in (1, 2)
+                team_ratio = hit / max(1, total)
+                marker_ratio = any_hit / max(1, total)
+            # 真实 KPL 帧里阵营边框会被英雄原画、选中框和转播调色覆盖，不能把
+            # 红蓝阈值设成硬门槛。它只作很小的同队加分，主体仍是头像结构比较。
+            if labels is not None and marker_ratio < 0.012:
+                continue
+            score = min(1.0, similarity + min(0.025, team_ratio * 0.15)
+                        + min(0.04, candidate["circle"] * 0.12))
+            if score >= min_similarity:
+                best_for_slot.append({"slot": slot, "candidate": index,
+                                      "score": score, "similarity": similarity,
+                                      "shapeSimilarity": shape_similarity,
+                                      "colourSimilarity": colour_similarity,
+                                      "circleScore": candidate["circle"],
+                                      "markerColourRatio": marker_ratio,
+                                      "teamColourRatio": team_ratio})
+        pairs.extend(sorted(best_for_slot, key=lambda p: -p["score"])[:6])
+
+    # 全局贪心一对一分配。同一个小地图头像不能同时冒充两名选手。
+    used_slots: set[int] = set()
+    used_candidates: list[int] = []
+    matches: list[dict[str, Any]] = []
+    for pair in sorted(pairs, key=lambda p: -p["score"]):
+        if pair["slot"] in used_slots:
+            continue
+        candidate = candidates[pair["candidate"]]
+        if any((candidate["cx"] - candidates[i]["cx"]) ** 2
+               + (candidate["cy"] - candidates[i]["cy"]) ** 2
+               < (min(candidate["size"], candidates[i]["size"]) * 0.65) ** 2
+               for i in used_candidates):
+            continue
+        used_slots.add(pair["slot"])
+        used_candidates.append(pair["candidate"])
+        matches.append({
+            "slot": pair["slot"],
+            "teamId": 100 if pair["slot"] <= 5 else 200,
+            "x": round(candidate["cx"] / width, 4),
+            "y": round(candidate["cy"] / height, 4),
+            "confidence": round(pair["score"], 3),
+            "appearanceSimilarity": round(pair["similarity"], 3),
+            "shapeSimilarity": round(pair["shapeSimilarity"], 3),
+            "colourSimilarity": round(pair["colourSimilarity"], 3),
+            "circleScore": round(pair["circleScore"], 3),
+            "markerColourRatio": round(pair["markerColourRatio"], 3),
+            "teamColourRatio": round(pair["teamColourRatio"], 3),
+            "method": "portrait-template",
+        })
+    return sorted(matches, key=lambda m: m["slot"])
+
+
+def detect_with_portraits(
+    image: Path,
+    box: tuple[float, float, float, float],
+    portrait_boxes: dict[int, tuple[float, float, float, float]],
+    thresholds: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """颜色只提团队先验；位置与槽位由两侧头像逐一模板匹配。"""
+    thresholds = thresholds or default_thresholds()
+    data, width, height = read_rgb(image, box)
+    labels = classify_pixels(data, width, height, thresholds)
+    templates: dict[int, bytes] = {}
+    for slot, portrait_box in portrait_boxes.items():
+        try:
+            raw, _, _ = read_rgb(image, portrait_box, size=24)
+        except Exception:  # 单个头像模板失败不能毁掉其他九个
+            continue
+        templates[int(slot)] = raw
+    matches = match_portraits(data, width, height, templates, labels)
+    blue = [m for m in matches if m["teamId"] == 100]
+    red = [m for m in matches if m["teamId"] == 200]
+    problems: list[str] = []
+    if len(templates) < 10:
+        problems.append(f"只标定了 {len(templates)}/10 个两侧英雄头像模板。")
+    if len(matches) < 6:
+        problems.append(f"只有 {len(matches)} 个头像通过逐一匹配门槛；其余拒绝输出，避免假点。")
+    confidence = (sum(m["confidence"] for m in matches) / len(matches)) if matches else 0.0
+    if not thresholds.get("verified"):
+        confidence = min(confidence, 0.45)
+        problems.append("阵营颜色阈值尚未人工核验，整体置信度已封顶为 0.45。")
+    return {
+        "blue": blue, "red": red, "blueCount": len(blue), "redCount": len(red),
+        "matches": matches, "portraitTemplateCount": len(templates),
+        "thresholdsVerified": bool(thresholds.get("verified")),
+        "quality": {"usable": bool(matches), "confidence": round(confidence, 3),
+                    "problems": problems},
+        "method": "portrait-template",
     }
 
 
@@ -378,22 +641,27 @@ def to_observation_players(result: dict[str, Any]) -> dict[str, Any]:
 
     **关键的一步，也是最容易做错的一步。**
 
-    识别出来的是「一个蓝方标记在 (0.3, 0.4)」，
-    但观测结构要求的是「1 号位在 (0.3, 0.4)」——
-    中间隔着「哪个标记是哪个人」，而本模块**答不了这个问题**。
-
-    所以这里按位置排序后依次填进该方的槽位，并把置信度压到很低。
-    这是一个**明确标注为不可靠的猜测**，不是识别结果。
-    下游看到 0.2 的置信度就知道不能当事实用。
-
-    等以后做出英雄区分，这个函数才会真正有意义。在那之前，
-    位置信息的正经来源仍然是人工标注。
+    新结果已经通过侧边头像关联槽位，直接保留槽位但在真实样本人工验收前封顶。
+    旧颜色结果仍按位置临时排序并砍半，兼容已有数据但不会冒充可信事实。
     """
-    confidence = result["quality"]["confidence"]
+    confidence = float((result.get("quality") or {}).get("confidence", 0.0))
     if not result["quality"]["usable"]:
         return {}
 
     players: dict[str, Any] = {}
+    if result.get("method") == "portrait-template":
+        for match in result.get("matches", []):
+            slot = match.get("slot")
+            if not isinstance(slot, int) or not 1 <= slot <= 10:
+                continue
+            # 已经逐头像关联，不再砍半；但轻量模板法在真实样本人工核验前封顶 0.68。
+            confidence = min(0.68, float(match.get("confidence", 0.0)))
+            players[str(slot)] = {
+                "x": schema.field(match["x"], schema.SOURCE_CV, confidence),
+                "y": schema.field(match["y"], schema.SOURCE_CV, confidence),
+            }
+        return players
+
     for team_key, slots in (("blue", range(1, 6)), ("red", range(6, 11))):
         blobs = sorted(result[team_key], key=lambda b: (b["y"], b["x"]))
         for slot, blob in zip(slots, blobs):
@@ -421,5 +689,5 @@ def summary(result: dict[str, Any]) -> str:
         for blob in result["red"]:
             lines.append(f"    红  ({blob['x']:.3f}, {blob['y']:.3f})   {blob['pixels']} 像素")
     lines.append("")
-    lines.append("  注意：本模块认不出是哪个英雄，只知道「这里有一个某方的标记」。")
+    lines.append("  有头像模板时按 1~10 号槽位关联；低相似度候选会被拒绝，不凑人数。")
     return "\n".join(lines)

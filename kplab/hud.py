@@ -75,11 +75,30 @@ REGIONS: dict[str, dict[str, Any]] = {
     },
     "redGold": {"label": "红方总经济", "read": "int", "why": "同上"},
     "banner": {
-        "label": "播报（屏幕中间上方）",
+        "label": "播报总范围（屏幕中间上方）",
         "read": "banner",
         "why": "推塔 / 击杀 / 开龙都会在这里弹一条横幅并停留几秒。"
-               "**这是判断「是谁拿的」唯一可靠的来源** —— "
-               "小地图上图标消失只说明资源死了，说不出归属。",
+               "作为固定地标状态机的独立佐证，但不能单独决定事件时间。",
+    },
+    "bannerKiller": {
+        "label": "播报·击败者",
+        "read": "banner_text",
+        "why": "击杀方英雄头像/名称；无法读清时保留未知，不猜。",
+    },
+    "bannerTarget": {
+        "label": "播报·被击败/被摧毁目标",
+        "read": "banner_text",
+        "why": "被击败英雄或被摧毁防御塔。",
+    },
+    "bannerObjective": {
+        "label": "播报·龙种类",
+        "read": "banner_text",
+        "why": "暴君、暗影暴君、主宰、暗影主宰或风暴龙王。",
+    },
+    "bannerAssists": {
+        "label": "播报·助攻",
+        "read": "banner_text",
+        "why": "助攻头像/名称列表；团战播报堆积时单独保留。",
     },
     "minimap": {
         "label": "小地图",

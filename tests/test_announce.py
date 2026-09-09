@@ -277,6 +277,30 @@ class BannerRegionIsRegistered(unittest.TestCase):
         from kplab import hud
         self.assertIn(announce.BANNER_REGION, hud.REGIONS)
 
+    def test_banner_subregions_are_all_calibratable(self):
+        from kplab import hud
+        for region in announce.BANNER_FIELD_REGIONS.values():
+            self.assertIn(region, hud.REGIONS)
+
+
+class StructuredBannerFields(unittest.TestCase):
+    def test_objective_type_and_assists_are_preserved(self):
+        parsed = announce.parse_fields({
+            "bannerKiller": "暖阳",
+            "bannerTarget": "对方打野",
+            "bannerObjective": "击败风暴龙王",
+            "bannerAssists": "选手A、选手B",
+        })
+        self.assertEqual(parsed["objectiveType"], "STORM_DRAGON_KILL")
+        self.assertEqual(parsed["killer"], "暖阳")
+        self.assertEqual(parsed["assists"], ["选手A", "选手B"])
+
+    def test_unreadable_fields_stay_unknown(self):
+        parsed = announce.parse_fields({})
+        self.assertIsNone(parsed["killer"])
+        self.assertIsNone(parsed["objectiveType"])
+        self.assertFalse(parsed["complete"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

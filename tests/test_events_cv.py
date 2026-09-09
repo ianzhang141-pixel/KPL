@@ -34,21 +34,25 @@ class TowersAreOneWay(unittest.TestCase):
     def test_disappearing_icon_reports_destruction(self):
         tracker = events_cv.TowerTracker("t1", BLUE, "蓝方一塔")
         self.assertIsNone(tracker.update(0, PRESENT))
-        event = tracker.update(300, GONE)
+        self.assertIsNone(tracker.update(300, GONE), "单帧变化必须先当成候选遮挡")
+        event = tracker.update(330, GONE)
         self.assertIsNotNone(event)
         self.assertEqual(event["type"], "TOWER_DESTROYED")
+        self.assertIn("candidateWindow", event)
 
     def test_credit_goes_to_the_other_team(self):
         """塔属于蓝方，拆掉它的功劳记给红方。"""
         tracker = events_cv.TowerTracker("t1", BLUE, "蓝方一塔")
         tracker.update(0, PRESENT)
-        self.assertEqual(tracker.update(300, GONE)["teamId"], RED)
+        tracker.update(300, GONE)
+        self.assertEqual(tracker.update(330, GONE)["teamId"], RED)
 
     def test_reappearing_icon_is_recorded_as_a_contradiction(self):
         """塔不会重建。图标回来了 = 我判错了，必须记下来。"""
         tracker = events_cv.TowerTracker("t1", BLUE, "蓝方一塔")
         tracker.update(0, PRESENT)
         tracker.update(300, GONE)
+        tracker.update(330, GONE)
         tracker.update(360, PRESENT)
         self.assertTrue(tracker.contradictions,
                         "塔图标回来了却没有记为矛盾 —— 那等于默认它重建了")
@@ -56,8 +60,25 @@ class TowersAreOneWay(unittest.TestCase):
     def test_destruction_is_reported_only_once(self):
         tracker = events_cv.TowerTracker("t1", BLUE, "蓝方一塔")
         tracker.update(0, PRESENT)
-        self.assertIsNotNone(tracker.update(300, GONE))
+        tracker.update(300, GONE)
+        self.assertIsNotNone(tracker.update(330, GONE))
         self.assertIsNone(tracker.update(360, GONE), "同一座塔被报了两次摧毁")
+
+    def test_single_changed_frame_is_recorded_as_occlusion_not_destruction(self):
+        tracker = events_cv.TowerTracker("t1", BLUE, "蓝方一塔")
+        tracker.update(0, PRESENT)
+        self.assertIsNone(tracker.update(30, GONE))
+        self.assertIsNone(tracker.update(60, PRESENT))
+        self.assertEqual(tracker.destroyed_at, None)
+        self.assertEqual(len(tracker.occlusions), 1)
+
+    def test_candidate_keeps_game_and_source_time_windows(self):
+        tracker = events_cv.TowerTracker("t1", BLUE, "蓝方一塔")
+        tracker.update(20, PRESENT, 452)
+        tracker.update(25, GONE, 457)
+        event = tracker.update(30, GONE, 462)
+        self.assertEqual(event["candidateWindow"], {"fromSec": 20, "toSec": 30})
+        self.assertEqual(event["sourceCandidateWindow"], {"fromSec": 452, "toSec": 462})
 
 
 class ObjectivesAreCyclic(unittest.TestCase):
@@ -102,20 +123,26 @@ class ObjectiveFormDependsOnTime(unittest.TestCase):
 
     def test_tyrant_becomes_dark_tyrant(self):
         early = events_cv.resolve_objective_event("tyrantPit", 120, self.rules)
-        switch = float(rules.value(self.rules, "darkTyrantFromSec"))
+        switch = float(rules.value(self.rules, "shadowOverlordFromSec"))
         late = events_cv.resolve_objective_event("tyrantPit", switch + 60, self.rules)
         self.assertEqual(early, "TYRANT_KILL")
         self.assertEqual(late, "DARK_TYRANT_KILL")
         self.assertNotEqual(early, late, "两种形态被记成了同一个事件")
 
-    def test_overlord_becomes_storm_dragon(self):
-        switch = float(rules.value(self.rules, "stormDragonFromSec"))
+    def test_overlord_becomes_shadow_overlord(self):
+        switch = float(rules.value(self.rules, "darkTyrantFromSec"))
         self.assertEqual(
             events_cv.resolve_objective_event("overlordPit", switch - 60, self.rules),
             "OVERLORD_KILL")
         self.assertEqual(
             events_cv.resolve_objective_event("overlordPit", switch + 60, self.rules),
-            "STORM_DRAGON_KILL")
+            "PROPHET_OVERLORD_KILL")
+
+    def test_storm_dragon_can_be_in_either_pit(self):
+        switch = float(rules.value(self.rules, "stormDragonFromSec"))
+        for name in ("stormDragonLowerPit", "stormDragonUpperPit"):
+            self.assertEqual(events_cv.resolve_objective_event(name, switch + 1, self.rules),
+                             "STORM_DRAGON_KILL")
 
 
 class PortraitsNeedCorroboration(unittest.TestCase):
@@ -207,6 +234,54 @@ class AttributionIsHonestlyUnknown(unittest.TestCase):
         self.assertEqual(events_cv.to_observation_events(scan_result), [])
 
 
+class TowerAnnouncementsAreSupportingNotRequired(unittest.TestCase):
+    BASE = [{"type": "TOWER_DESTROYED", "atSec": 300, "teamId": RED,
+             "confidence": 0.62, "evidence": ["固定地标持续缺失"]}]
+
+    def test_missing_announcement_keeps_state_machine_event(self):
+        result = events_cv.corroborate_tower_events(self.BASE, [])
+        self.assertEqual(len(result), 1)
+        self.assertGreaterEqual(result[0]["confidence"], 0.5)
+
+    def test_matching_announcement_increases_confidence(self):
+        result = events_cv.corroborate_tower_events(
+            self.BASE, [{"type": "TOWER_DESTROYED", "atSec": 311, "teamId": RED}])
+        self.assertGreater(result[0]["confidence"], self.BASE[0]["confidence"])
+        self.assertIn("推塔播报佐证", result[0]["evidence"])
+
+    def test_conflicting_announcement_forces_review(self):
+        result = events_cv.corroborate_tower_events(
+            self.BASE, [{"type": "TOWER_DESTROYED", "atSec": 301, "teamId": BLUE}])
+        self.assertLess(result[0]["confidence"], 0.5)
+        self.assertTrue(result[0]["needsReview"])
+
+
+class TowerHighRateBacktracking(unittest.TestCase):
+    EVENT = {"type": "TOWER_DESTROYED", "atSec": 120, "teamId": RED,
+             "confidence": 0.62, "evidence": ["固定地标持续缺失"]}
+
+    def test_sustained_missing_tail_tightens_event_time(self):
+        result = events_cv.refine_tower_trace(self.EVENT, [
+            {"atSec": 100.0, "distance": 0.0},
+            {"atSec": 100.5, "distance": 0.03},
+            {"atSec": 101.0, "distance": 0.22},
+            {"atSec": 101.5, "distance": 0.24},
+            {"atSec": 102.0, "distance": 0.23},
+        ])
+        self.assertTrue(result["backtrack"]["ok"])
+        self.assertEqual(result["atSec"], 101.0)
+        self.assertIn("事后高帧率回溯", result["evidence"])
+
+    def test_reappearing_icon_is_rejected_as_occlusion(self):
+        result = events_cv.refine_tower_trace(self.EVENT, [
+            {"atSec": 100.0, "distance": 0.0},
+            {"atSec": 100.5, "distance": 0.23},
+            {"atSec": 101.0, "distance": 0.02},
+        ])
+        self.assertFalse(result["backtrack"]["ok"])
+        self.assertLess(result["confidence"], 0.5)
+
+
 class RefusesWithoutCalibration(unittest.TestCase):
     def test_scan_refuses_when_landmarks_are_not_calibrated(self):
         empty = Path(tempfile.mkdtemp())
@@ -227,6 +302,29 @@ class RefusesWithoutCalibration(unittest.TestCase):
         self.assertIn("good", items)
         self.assertNotIn("badKind", items)
         self.assertNotIn("badBox", items)
+
+    def test_old_single_high_ground_tower_migrates_to_middle_lane(self):
+        import json
+        directory = Path(tempfile.mkdtemp())
+        target = directory / "kpl" / "landmarks.json"
+        target.parent.mkdir(parents=True)
+        target.write_text(json.dumps({"calibrated": True, "items": {
+            "blue_hg": {"kind": "tower", "teamId": BLUE,
+                        "box": [0.1, 0.1, 0.02, 0.02]}
+        }}), encoding="utf-8")
+        items = events_cv.load_landmarks(directory)["items"]
+        self.assertIn("blue_mid_hg", items)
+        self.assertNotIn("blue_hg", items)
+
+    def test_skill_and_storm_boxes_are_valid_landmark_kinds(self):
+        directory = Path(tempfile.mkdtemp())
+        events_cv.save_landmarks(directory, {
+            "u1": {"kind": "ultimate", "slot": 1, "box": [0.1, 0.1, 0.01, 0.01]},
+            "s1": {"kind": "summoner", "slot": 1, "box": [0.2, 0.1, 0.02, 0.02]},
+            "dragon": {"kind": "storm_objective", "box": [0.3, 0.3, 0.03, 0.03]},
+        })
+        kinds = {v["kind"] for v in events_cv.load_landmarks(directory)["items"].values()}
+        self.assertEqual(kinds, {"ultimate", "summoner", "storm_objective"})
 
 
 if __name__ == "__main__":

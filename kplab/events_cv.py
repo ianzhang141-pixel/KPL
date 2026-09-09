@@ -44,6 +44,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -55,9 +56,15 @@ from .rules import BLUE, RED
 # 地标类型决定用哪条状态机。**这个区分是本模块的核心。**
 KIND_TOWER = "tower"            # 单向：消失即摧毁，不会回来
 KIND_OBJECTIVE = "objective"    # 周期：消失是被击杀，之后会刷新回来
+KIND_STORM_OBJECTIVE = "storm_objective"  # 20 分钟后，可能出现在任一龙坑
 KIND_PORTRAIT = "portrait"      # 变灰即阵亡，复活后变回彩色
+KIND_ULTIMATE = "ultimate"      # 头像角落绿点：大招就绪状态
+KIND_SUMMONER = "summoner"      # 头像侧边：召唤师技能图标
 
-LANDMARK_KINDS = (KIND_TOWER, KIND_OBJECTIVE, KIND_PORTRAIT)
+LANDMARK_KINDS = (
+    KIND_TOWER, KIND_OBJECTIVE, KIND_STORM_OBJECTIVE,
+    KIND_PORTRAIT, KIND_ULTIMATE, KIND_SUMMONER,
+)
 
 # 中立资源坑 → 事件类型。哪个坑刷出什么由时间决定（暴君 10 分钟后变黑暗暴君），
 # 所以这里只记「哪个坑被拿了」，具体是哪种形态交给 resolve_objective_event()。
@@ -65,8 +72,18 @@ OBJECTIVE_PITS = {
     "tyrantPit": {"label": "暴君坑（下路河道）", "early": "TYRANT_KILL",
                   "late": "DARK_TYRANT_KILL", "switchRule": "darkTyrantFromSec"},
     "overlordPit": {"label": "主宰坑（上路河道）", "early": "OVERLORD_KILL",
-                    "late": "STORM_DRAGON_KILL", "switchRule": "stormDragonFromSec"},
+                    "late": "PROPHET_OVERLORD_KILL", "switchRule": "shadowOverlordFromSec"},
+    "stormDragonLowerPit": {"label": "风暴龙王候选坑（下路河道）",
+                             "early": "STORM_DRAGON_KILL",
+                             "late": "STORM_DRAGON_KILL",
+                             "switchRule": "stormDragonFromSec"},
+    "stormDragonUpperPit": {"label": "风暴龙王候选坑（上路河道）",
+                             "early": "STORM_DRAGON_KILL",
+                             "late": "STORM_DRAGON_KILL",
+                             "switchRule": "stormDragonFromSec"},
 }
+
+IGNORE_BEFORE_GAME_SEC = 10.0
 
 
 def landmarks_path(data_dir: Path) -> Path:
@@ -90,6 +107,17 @@ def load_landmarks(data_dir: Path) -> dict[str, Any]:
     if not isinstance(saved, dict):
         return {"calibrated": False, "items": {}}
     items = saved.get("items") if isinstance(saved.get("items"), dict) else {}
+    # v0.9.4 及更早版本把每方三座高地塔错误地合成了一个框。保留旧框并迁移为
+    # 中路高地塔，另外两路明确留待补标，避免升级后旧数据整批消失。
+    items = dict(items)
+    for side in ("blue", "red"):
+        old = f"{side}_hg"
+        new = f"{side}_mid_hg"
+        if old in items and new not in items:
+            migrated = dict(items[old])
+            migrated["label"] = ("蓝方" if side == "blue" else "红方") + "中路高地塔（旧标定迁移）"
+            items[new] = migrated
+        items.pop(old, None)
     return {"calibrated": bool(saved.get("calibrated")) and bool(items), "items": items}
 
 
@@ -181,32 +209,72 @@ GRAY_RATIO = 0.45
 # ---------------------------------------------------------------- 状态机
 
 class TowerTracker:
-    """防御塔：**单向**。消失即摧毁，不会回来。
+    """防御塔固定地标状态机。
 
-    「图标又出现了」不是塔重建了 —— 塔不会重建。
-    那只说明我判错了一次，必须记下来而不是当没发生。
+    一帧变化只进入 ``maybe_occluded``，不能直接判摧毁。只有变化持续跨过
+    多个采样点，才进入 ``destroyed``。候选期间图标恢复就是人物头像/特效遮挡；
+    已确认后恢复才是矛盾。候选事件保留上一帧到确认帧的时间窗，供高帧率回溯。
     """
 
-    def __init__(self, name: str, team_id: int, label: str) -> None:
+    def __init__(self, name: str, team_id: int, label: str,
+                 confirmations: int = 2) -> None:
         self.name, self.team_id, self.label = name, team_id, label
         self.baseline: dict[str, float] | None = None
         self.destroyed_at: float | None = None
+        self.confirmations = max(2, int(confirmations))
+        self.changed_count = 0
+        self.candidate_from: float | None = None
+        self.last_present_at: float | None = None
+        self.candidate_source_from: float | None = None
+        self.last_present_source_at: float | None = None
+        self.occlusions: list[dict[str, Any]] = []
         self.contradictions: list[dict[str, Any]] = []
 
-    def update(self, at_sec: float, signature: dict[str, float]) -> dict[str, Any] | None:
+    def update(self, at_sec: float, signature: dict[str, float],
+               source_sec: float | None = None) -> dict[str, Any] | None:
+        source_sec = at_sec if source_sec is None else source_sec
         if self.baseline is None:
             self.baseline = signature
+            self.last_present_at = at_sec
+            self.last_present_source_at = source_sec
             return None
         changed = signature_distance(self.baseline, signature) > CHANGE_THRESHOLD
 
         if self.destroyed_at is None:
             if changed:
-                self.destroyed_at = at_sec
+                if self.changed_count == 0:
+                    self.candidate_from = at_sec
+                    self.candidate_source_from = source_sec
+                self.changed_count += 1
+                if self.changed_count < self.confirmations:
+                    return None
+                self.destroyed_at = self.candidate_from
                 # 塔属于哪一方，功劳就记给对面
                 winner = RED if self.team_id == BLUE else BLUE
                 return {"type": "TOWER_DESTROYED", "teamId": winner,
-                        "atSec": at_sec, "landmark": self.name,
-                        "note": f"{self.label} 的图标消失"}
+                        "atSec": self.destroyed_at, "landmark": self.name,
+                        "candidateWindow": {
+                            "fromSec": self.last_present_at,
+                            "toSec": at_sec,
+                        },
+                        "sourceCandidateWindow": {
+                            "fromSec": self.last_present_source_at,
+                            "toSec": source_sec,
+                        },
+                        "evidence": ["固定地标持续缺失", "跨帧状态机"],
+                        "needsBacktrack": True,
+                        "note": f"{self.label} 的图标持续缺失，已排除单帧遮挡"}
+            if self.changed_count:
+                self.occlusions.append({
+                    "fromSec": self.candidate_from, "toSec": at_sec,
+                    "landmark": self.name,
+                    "why": "图标短暂变化后恢复，按英雄头像或特效遮挡处理，不计摧毁。",
+                })
+            self.changed_count = 0
+            self.candidate_from = None
+            self.candidate_source_from = None
+            self.last_present_at = at_sec
+            self.last_present_source_at = source_sec
             return None
 
         if not changed:
@@ -303,6 +371,33 @@ class PortraitTracker:
             # 头像基准随版本/皮肤会漂移，复活时用新值缓慢校正
             self.alive_saturation = 0.7 * self.alive_saturation + 0.3 * saturation
         return None
+
+
+class UltimateTracker:
+    """头像角落绿点状态。蓝方在左上，红方在右上；位置由标定框决定。"""
+
+    def __init__(self, slot: int, label: str) -> None:
+        self.slot, self.label = slot, label
+        self.ready: bool | None = None
+
+    @staticmethod
+    def is_ready(signature: dict[str, float]) -> bool:
+        return (signature["g"] >= 70
+                and signature["g"] - signature["r"] >= 14
+                and signature["g"] - signature["b"] >= 8
+                and signature["saturation"] >= 0.18)
+
+    def update(self, at_sec: float, signature: dict[str, float]) -> dict[str, Any] | None:
+        ready = self.is_ready(signature)
+        if self.ready is None:
+            self.ready = ready
+            return {"slot": self.slot, "atSec": at_sec, "ultimateReady": ready,
+                    "note": f"{self.label} 初始状态：{'大招就绪' if ready else '大招冷却'}"}
+        if ready == self.ready:
+            return None
+        self.ready = ready
+        return {"slot": self.slot, "atSec": at_sec, "ultimateReady": ready,
+                "note": f"{self.label}：{'绿点出现，大招就绪' if ready else '绿点消失，大招进入冷却'}"}
 
 
 # ---------------------------------------------------------------- 佐证
@@ -416,6 +511,137 @@ def attribute_objective(
             "attribution": "附近双方比分都有变化，判断不了归属。"}
 
 
+def corroborate_tower_events(
+    events: list[dict[str, Any]],
+    announcements: list[dict[str, Any]],
+    window_sec: float = 20.0,
+) -> list[dict[str, Any]]:
+    """播报是塔事件的加分项，不是开关。
+
+    固定地标持续缺失已经能成立；附近若有同队推塔播报则提高置信度。没有播报
+    保留事件，因为密集团战会让播报延迟、堆积甚至被覆盖。播报明确冲突则降级。
+    """
+    out: list[dict[str, Any]] = []
+    for event in events:
+        if event.get("type") != "TOWER_DESTROYED":
+            out.append(event)
+            continue
+        nearby = [a for a in announcements
+                  if a.get("type") == "TOWER_DESTROYED"
+                  and abs(float(a.get("atSec", 0)) - float(event.get("atSec", 0))) <= window_sec]
+        same = [a for a in nearby if a.get("teamId") == event.get("teamId")]
+        conflict = [a for a in nearby
+                    if a.get("teamId") in (BLUE, RED)
+                    and a.get("teamId") != event.get("teamId")]
+        if same:
+            out.append({**event, "confidence": max(0.82, float(event.get("confidence", 0))),
+                        "evidence": list(event.get("evidence") or []) + ["推塔播报佐证"],
+                        "announcementAtSec": same[0].get("atSec")})
+        elif conflict:
+            out.append({**event, "confidence": 0.35,
+                        "needsReview": True,
+                        "note": event.get("note", "") + "；附近播报阵营与地标判断冲突，已降级"})
+        else:
+            out.append({**event,
+                        "note": event.get("note", "") + "；未找到播报，但播报仅为辅助信号"})
+    return out
+
+
+def refine_tower_trace(event: dict[str, Any], samples: list[dict[str, Any]]) -> dict[str, Any]:
+    """用高帧率回溯轨迹收紧推塔时间；尾部必须持续缺失。"""
+    usable = [s for s in samples if "distance" in s]
+    if len(usable) < 3:
+        return {**event, "confidence": min(0.35, float(event.get("confidence", 0))),
+                "needsReview": True, "backtrack": {"ok": False, "samples": len(usable)},
+                "note": event.get("note", "") + "；高帧率回溯样本不足"}
+    flags = [float(s["distance"]) > CHANGE_THRESHOLD for s in usable]
+    tail = 0
+    for flag in reversed(flags):
+        if not flag:
+            break
+        tail += 1
+    if tail < 2:
+        return {**event, "confidence": 0.35, "needsReview": True,
+                "backtrack": {"ok": False, "samples": len(usable), "changedTail": tail},
+                "note": event.get("note", "") + "；高帧率回溯显示图标恢复，更像遮挡"}
+    first = len(usable) - tail
+    exact_at = float(usable[first]["atSec"])
+    return {**event, "atSec": exact_at, "confidence": max(0.72, float(event.get("confidence", 0))),
+            "needsBacktrack": False,
+            "evidence": list(event.get("evidence") or []) + ["事后高帧率回溯"],
+            "backtrack": {"ok": True, "samples": len(usable), "changedTail": tail,
+                          "fromSec": usable[0]["atSec"], "toSec": usable[-1]["atSec"]},
+            "note": event.get("note", "") + f"；高帧率回溯收紧到 {exact_at:.2f}s"}
+
+
+def refine_tower_events(
+    source: Path,
+    scan_result: dict[str, Any],
+    landmarks: dict[str, Any],
+    step_sec: float = 0.5,
+) -> dict[str, Any]:
+    """只回溯粗扫命中的小窗口，不对整场视频高密度解码。"""
+    events = list(scan_result.get("events") or [])
+    targets = [e for e in events
+               if e.get("type") == "TOWER_DESTROYED" and e.get("candidateWindow")]
+    if not targets:
+        return {"ok": True, "events": events, "refined": 0, "windows": []}
+    if not source.is_file():
+        return {"ok": False, "events": events, "refined": 0,
+                "error": f"找不到本地录像，已保留粗扫窗口，稍后可从原链接按窗口回溯：{source}"}
+
+    from . import video
+    item_table = landmarks.get("items") if isinstance(landmarks, dict) else {}
+    by_key = {(e.get("landmark"), e.get("atSec")): e for e in events}
+    reports: list[dict[str, Any]] = []
+    refined_count = 0
+    with tempfile.TemporaryDirectory(prefix="kpl-tower-refine-") as tmp:
+        work = Path(tmp)
+        for index, event in enumerate(targets):
+            item = (item_table or {}).get(event.get("landmark"))
+            window = event.get("candidateWindow") or {}
+            source_window = event.get("sourceCandidateWindow") or window
+            if not item or not _valid_box(item.get("box")):
+                continue
+            game_start = max(IGNORE_BEFORE_GAME_SEC, float(window.get("fromSec") or 0.0))
+            start = max(0.0, float(source_window.get("fromSec") or game_start))
+            end = max(start, float(source_window.get("toSec") or start))
+            clock_offset = start - game_start
+            times: list[float] = []
+            at = start
+            while at <= end + 1e-6:
+                times.append(round(at, 3))
+                at += max(0.2, min(1.0, step_sec))
+            if times[-1] < end:
+                times.append(end)
+            trace: list[dict[str, Any]] = []
+            baseline = None
+            for sample_index, at in enumerate(times):
+                shot = work / f"tower_{index}_{sample_index}.jpg"
+                try:
+                    video.crop_region(source, shot, at, tuple(item["box"]), scale_width=64)
+                    signature = read_patch(shot, (0.0, 0.0, 1.0, 1.0), size=24)
+                    if baseline is None:
+                        baseline = signature
+                        trace.append({"atSec": round(at - clock_offset, 3), "distance": 0.0})
+                    else:
+                        trace.append({"atSec": round(at - clock_offset, 3),
+                                      "distance": signature_distance(baseline, signature)})
+                except Exception as err:  # 单个样本失败不毁掉窗口
+                    trace.append({"atSec": round(at - clock_offset, 3),
+                                  "error": str(err)[:120]})
+                finally:
+                    shot.unlink(missing_ok=True)
+            updated = refine_tower_trace(event, trace)
+            by_key[(event.get("landmark"), event.get("atSec"))] = updated
+            refined_count += bool(updated.get("backtrack", {}).get("ok"))
+            reports.append({"landmark": event.get("landmark"),
+                            "window": window, "backtrack": updated.get("backtrack")})
+
+    merged = [by_key.get((e.get("landmark"), e.get("atSec")), e) for e in events]
+    return {"ok": True, "events": merged, "refined": refined_count, "windows": reports}
+
+
 def resolve_objective_event(pit_name: str, at_sec: float,
                             rules_table: dict[str, Any]) -> str:
     """同一个坑在不同时间刷的是不同的东西。
@@ -443,6 +669,7 @@ def scan(
     data_dir: Path,
     rules_table: dict[str, Any] | None = None,
     score_changes: list[dict[str, Any]] | None = None,
+    announcements: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """按时间顺序扫一遍帧图，产出事件。
 
@@ -456,7 +683,7 @@ def scan(
         return {
             "ok": False,
             "error": "地标还没有标定过，检测不了。\n"
-                     "需要在标定页上把每座塔、两个资源坑、十个头像的位置框出来。\n"
+                     "需要在标定页上框出18座塔、常规与风暴龙坑候选区、十个头像及技能位置。\n"
                      "**没有标定就猜位置，产出的每一个事件都是错的。**",
             "events": [], "landmarksNeeded": True,
         }
@@ -465,30 +692,63 @@ def scan(
     towers = {n: TowerTracker(n, i.get("teamId", BLUE), i.get("label", n))
               for n, i in items.items() if i["kind"] == KIND_TOWER}
     objectives = {n: ObjectiveTracker(n, i.get("label", n))
-                  for n, i in items.items() if i["kind"] == KIND_OBJECTIVE}
+                  for n, i in items.items()
+                  if i["kind"] in (KIND_OBJECTIVE, KIND_STORM_OBJECTIVE)}
     portraits = {n: PortraitTracker(i.get("slot", 1), i.get("label", n))
                  for n, i in items.items() if i["kind"] == KIND_PORTRAIT}
+    ultimates = {n: UltimateTracker(i.get("slot", 1), i.get("label", n))
+                 for n, i in items.items() if i["kind"] == KIND_ULTIMATE}
 
     raw_events: list[dict[str, Any]] = []
     portrait_events: list[dict[str, Any]] = []
+    status_changes: list[dict[str, Any]] = []
     errors: list[str] = []
+    ignored_frames = 0
+
+    try:
+        objective_from = float(rules.value(rules_table, "tyrantFirstSpawnSec"))
+    except (TypeError, ValueError, KeyError):
+        objective_from = 240.0
+    try:
+        storm_from = float(rules.value(rules_table, "stormDragonFromSec"))
+    except (TypeError, ValueError, KeyError):
+        storm_from = 1200.0
 
     for frame in frames:
-        at_sec = float(frame["atSec"])
+        at_sec = float(frame.get("gameSec", frame["atSec"]))
+        source_sec = float(frame.get("sourceAtSec", frame["atSec"]))
+        if at_sec < IGNORE_BEFORE_GAME_SEC:
+            ignored_frames += 1
+            continue
         path = Path(frame["path"])
         for name, item in items.items():
+            kind = item["kind"]
+            if kind == KIND_SUMMONER:
+                continue  # 当前只保存图标模板；CD 读法需由后续真实帧校准
+            if kind == KIND_OBJECTIVE and not (objective_from <= at_sec < storm_from):
+                continue
+            if kind == KIND_STORM_OBJECTIVE and at_sec < storm_from:
+                continue
             try:
                 signature = read_patch(path, tuple(item["box"]))
             except Exception as err:            # noqa: BLE001 - 单块失败不该毁掉整场
                 errors.append(f"{path.name} 的 {name}: {type(err).__name__}: {err}")
                 continue
-            kind = item["kind"]
             if kind == KIND_TOWER:
-                event = towers[name].update(at_sec, signature)
+                event = towers[name].update(at_sec, signature, source_sec)
             elif kind == KIND_OBJECTIVE:
                 event = objectives[name].update(at_sec, signature)
-            else:
+            elif kind == KIND_STORM_OBJECTIVE:
+                event = objectives[name].update(at_sec, signature)
+            elif kind == KIND_PORTRAIT:
                 event = portraits[name].update(at_sec, signature)
+            elif kind == KIND_ULTIMATE:
+                event = ultimates[name].update(at_sec, signature)
+                if event is not None:
+                    status_changes.append(event)
+                continue
+            else:
+                continue
             if event is None:
                 continue
             if event["type"] == "PORTRAIT_GRAY":
@@ -500,7 +760,7 @@ def scan(
     resolved: list[dict[str, Any]] = []
     for event in raw_events:
         if event["type"] != "OBJECTIVE_TAKEN":
-            resolved.append({**event, "confidence": 0.6})
+            resolved.append({**event, "confidence": 0.62})
             continue
         kind = resolve_objective_event(event["pit"], event["atSec"], rules_table)
         resolved.append(attribute_objective({**event, "type": kind},
@@ -509,20 +769,46 @@ def scan(
     kills = corroborate_kills(portrait_events, score_changes or [])
 
     contradictions = [c for t in towers.values() for c in t.contradictions]
+    occlusions = [c for t in towers.values() for c in t.occlusions]
+    if contradictions:
+        bad = {c["landmark"] for c in contradictions}
+        resolved = [e for e in resolved
+                    if not (e.get("type") == "TOWER_DESTROYED"
+                            and e.get("landmark") in bad)]
     jitter = [r for o in objectives.values() for r in o.rejected]
+
+    # 两个风暴龙王候选坑是同一只龙的两个可能出生点。同一时间窗最多只能记一次。
+    deduped: list[dict[str, Any]] = []
+    for event in sorted(resolved, key=lambda e: float(e.get("atSec", 0))):
+        if (event.get("type") == "STORM_DRAGON_KILL"
+                and any(e.get("type") == "STORM_DRAGON_KILL"
+                        and abs(float(e.get("atSec", 0)) - float(event.get("atSec", 0))) <= 30
+                        for e in deduped)):
+            jitter.append({"atSec": event.get("atSec"), "landmark": event.get("pit"),
+                           "why": "两个候选龙坑在同一窗口触发，按同一只风暴龙王去重。"})
+            continue
+        deduped.append(event)
+    resolved = deduped
+    resolved = corroborate_tower_events(resolved, announcements or [])
 
     return {
         "ok": True,
         "events": resolved + kills["confirmed"],
         "kills": kills,
+        "statusChanges": status_changes,
         "contradictions": contradictions,
+        "occlusions": occlusions,
         "objectiveJitter": jitter,
+        "ignoredOpeningFrames": ignored_frames,
+        "ignoredBeforeSec": IGNORE_BEFORE_GAME_SEC,
+        "refinementWindows": [e["candidateWindow"] for e in resolved
+                              if e.get("needsBacktrack") and e.get("candidateWindow")],
         "readErrors": errors[:20],
-        "quality": _quality(resolved, kills, contradictions, errors),
+        "quality": _quality(resolved, kills, contradictions, errors, occlusions),
     }
 
 
-def _quality(resolved, kills, contradictions, errors) -> dict[str, Any]:
+def _quality(resolved, kills, contradictions, errors, occlusions=None) -> dict[str, Any]:
     problems: list[str] = []
     if contradictions:
         problems.append(
@@ -535,6 +821,10 @@ def _quality(resolved, kills, contradictions, errors) -> dict[str, Any]:
         )
     if errors:
         problems.append(f"{len(errors)} 块区域读取失败。")
+    if occlusions:
+        problems.append(
+            f"{len(occlusions)} 次地标短暂被英雄头像或特效遮挡，已由状态机排除，未计为推塔。"
+        )
 
     unattributed = sum(1 for e in resolved
                        if e.get("type", "").endswith("_KILL") and e.get("teamId") is None)

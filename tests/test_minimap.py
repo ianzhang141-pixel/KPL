@@ -239,6 +239,43 @@ class HonestAboutWhatItKnows(unittest.TestCase):
         self.assertLess(unverified, verified, "没标定过的阈值应该给更低的置信度")
 
 
+class PortraitTemplateAssociation(unittest.TestCase):
+    @staticmethod
+    def patterned(size):
+        colours = ((220, 50, 40), (40, 210, 70), (45, 75, 220), (220, 190, 45))
+        raw = bytearray()
+        for y in range(size):
+            for x in range(size):
+                quadrant = (1 if y >= size // 2 else 0) * 2 + (1 if x >= size // 2 else 0)
+                raw.extend(colours[quadrant])
+        return bytes(raw)
+
+    def test_same_appearance_scores_higher_than_different(self):
+        same = minimap.appearance_descriptor(self.patterned(24), 24, 24)
+        flat = minimap.appearance_descriptor(bytes((90, 90, 90)) * 24 * 24, 24, 24)
+        self.assertGreater(minimap.descriptor_similarity(same, same),
+                           minimap.descriptor_similarity(same, flat))
+
+    def test_slot_is_matched_to_minimap_icon_not_position_sorted(self):
+        canvas = bytearray(bytes((20, 25, 35)) * (SIZE * SIZE))
+        icon = self.patterned(10)
+        for y in range(10):
+            start = ((27 + y) * SIZE + 27) * 3
+            canvas[start:start + 30] = icon[y * 30:(y + 1) * 30]
+        matches = minimap.match_portraits(
+            bytes(canvas), SIZE, SIZE, {4: self.patterned(24)}, min_similarity=0.55)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["slot"], 4)
+        self.assertAlmostEqual(matches[0]["x"], 0.5, delta=0.08)
+        self.assertAlmostEqual(matches[0]["y"], 0.5, delta=0.08)
+
+    def test_observation_keeps_template_matched_slot(self):
+        result = {"method": "portrait-template", "quality": {"usable": True},
+                  "matches": [{"slot": 8, "x": 0.2, "y": 0.7, "confidence": 0.64}]}
+        players = minimap.to_observation_players(result)
+        self.assertEqual(set(players), {"8"})
+
+
 @unittest.skipUnless(shutil.which("ffmpeg"), "需要 ffmpeg")
 class PixelReadingNeedsFfmpeg(unittest.TestCase):
     def test_missing_file_raises_clean_error(self):

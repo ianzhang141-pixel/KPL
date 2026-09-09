@@ -918,14 +918,24 @@ def api_minimap_detect(body: dict[str, Any]) -> dict[str, Any]:
                 return {"ok": False, "error": f"{key} 必须是整数。"}
 
     try:
-        result = minimap.detect(image, tuple(box), thresholds)
+        landmarks = events_cv.load_landmarks(data_dir).get("items", {})
+        portrait_boxes = {
+            int(item.get("slot")): tuple(item["box"])
+            for item in landmarks.values()
+            if item.get("kind") == events_cv.KIND_PORTRAIT
+            and item.get("slot") is not None and hud.valid_box(item.get("box"))
+        }
+        result = (
+            minimap.detect_with_portraits(image, tuple(box), portrait_boxes, thresholds)
+            if portrait_boxes else minimap.detect(image, tuple(box), thresholds)
+        )
     except Exception as err:      # noqa: BLE001 - 标定页要看见失败原因
         return {"ok": False, "error": f"{type(err).__name__}: {err}"}
     return {"ok": True, "result": result, "thresholds": thresholds}
 
 
 def api_landmarks_save(body: dict[str, Any]) -> dict[str, Any]:
-    """保存地标标定（每座塔、两个资源坑、十个头像在画面上的位置）。"""
+    """保存塔、资源坑、英雄头像、技能状态与播报字段的画面地标。"""
     data_dir = paths.ensure(_console().data_dir)
     items = body.get("items")
     if not isinstance(items, dict) or not items:
@@ -982,24 +992,57 @@ def api_events_scan(body: dict[str, Any]) -> dict[str, Any]:
                     at = float(stem.rsplit("_", 1)[-1][:-1])
                 except ValueError:
                     at = 0.0
-            frames.append({"atSec": at, "path": str(path)})
+            frames.append({"atSec": at, "sourceAtSec": at,
+                           "file": path.name, "path": str(path)})
     if not frames:
         return {"ok": False, "error": "这场没有抽出来的帧图，检测不了。先去控制台抽帧。"}
 
-    frames.sort(key=lambda f: f["atSec"])
+    # 帧文件名是原录像时间，完整KPL回放前面常有数分钟赛前/赞助商画面。
+    # 用已识别或人工标注的比赛计时求中位偏移，再把所有帧映射到游戏时间。
+    source_by_file = {f["file"]: float(f["sourceAtSec"]) for f in frames}
+    offsets: list[float] = []
+    for record_path in (store.observations_path(data_dir, game_id),
+                        store.annotations_path(data_dir, game_id)):
+        for record in store.read_jsonl_gz(record_path):
+            name = str(record.get("frameFile") or "")
+            game_at = record.get("atSec")
+            if name in source_by_file and isinstance(game_at, (int, float)):
+                offsets.append(source_by_file[name] - float(game_at))
+    clock_offset = statistics.median(offsets) if len(offsets) >= 5 else None
+    for frame in frames:
+        frame["gameSec"] = (
+            max(0.0, float(frame["sourceAtSec"]) - clock_offset)
+            if clock_offset is not None else float(frame["sourceAtSec"])
+        )
+    frames.sort(key=lambda f: f["gameSec"])
     result = events_cv.scan(frames, data_dir, rules.load(data_dir),
-                            body.get("scoreChanges") or [])
+                            body.get("scoreChanges") or [],
+                            body.get("announcements") or [])
     result["frameCount"] = len(frames)
+    result["gameClockMapped"] = clock_offset is not None
+    result["sourceToGameOffsetSec"] = round(clock_offset, 3) if clock_offset is not None else None
+    if result.get("ok") and clock_offset is None:
+        result.setdefault("quality", {}).setdefault("problems", []).append(
+            "没有至少5个可用比赛计时，暂时按录像时间扫描；赛前画面较长时需先运行自动识别。"
+        )
 
     if result.get("ok") and body.get("refine"):
         meta = store.load_meta(data_dir, game_id) or {}
         source = Path(str(meta.get("videoPath") or "")).expanduser()
+        tower_refined = events_cv.refine_tower_events(
+            source, result, events_cv.load_landmarks(data_dir),
+            step_sec=min(0.75, float(body.get("step") or 0.5)),
+        )
+        result["towerRefine"] = tower_refined
+        if tower_refined.get("ok"):
+            result["events"] = tower_refined["events"]
         profile = hud.get_profile(data_dir, str(body.get("profile") or "kpl_broadcast"))
         banner = (profile or {}).get("regions", {}).get(announce.BANNER_REGION)
-        times = [f["atSec"] for f in frames]
+        times = [f["gameSec"] for f in frames]
         refined = announce.refine(source, result, times,
                                   tuple(banner) if banner else None,
-                                  step_sec=float(body.get("step") or 1.5))
+                                  step_sec=float(body.get("step") or 1.5),
+                                  source_offset_sec=clock_offset or 0.0)
         result["refine"] = refined
         if refined.get("ok"):
             result["events"] = refined["events"]

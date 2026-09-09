@@ -39,8 +39,9 @@
   .box b { position:absolute; top:-19px; left:-2px; font-size:10px; background:#3b82f6;
            color:#fff; padding:1px 5px; border-radius:3px; font-weight:600; white-space:nowrap; }
   .box.mini b { background:#f59e0b; }
-  .dot { position:absolute; width:11px; height:11px; border-radius:50%;
-         transform:translate(-50%,-50%); border:2px solid #0f1216; pointer-events:none; }
+  .dot { position:absolute; min-width:18px; height:18px; padding:0 3px; border-radius:9px;
+         transform:translate(-50%,-50%); border:2px solid #0f1216; pointer-events:none;
+         color:#fff; font:bold 10px/14px system-ui; text-align:center; }
   .rlist { max-height:250px; overflow:auto; }
   .ritem { display:flex; justify-content:space-between; align-items:center; gap:8px;
            padding:6px 8px; border-bottom:1px solid #1c212a; font-size:12px; cursor:pointer; }
@@ -99,10 +100,10 @@
     </div>
 
     <div class="card" style="margin-top:14px">
-      <h2>③ 地标：塔 / 资源坑 / 头像 <span class="pill" id="lmPill">未标定</span></h2>
+      <h2>② 地标：塔 / 资源坑 / 头像 / 技能 <span class="pill" id="lmPill">未标定</span></h2>
       <p class="tip" style="margin-top:0">
-系统靠「图标在不在」来判断推塔和打龙 —— 塔被拆了，小地图上那个图标就没了。
-所以要先告诉它<b>每个图标在画面的哪个位置</b>。
+推塔使用<b>固定地标状态机</b>：一次变化先当遮挡，连续缺失才生成候选，
+随后在时间窗口内高帧率回溯，并用播报等第二信号校验。比赛时间前 10 秒不判断。
 
 先在下面选一个地标，再到画面上把那个图标<b>框小一点、贴紧图标</b>，
 框太大会把周围的地图背景一起框进去，图标消失也测不出变化。
@@ -115,17 +116,17 @@
       <div class="rlist" id="lmList" style="max-height:190px"></div>
       <div class="row" style="margin-top:10px">
         <div style="flex:0"><button onclick="saveLm()">保存地标</button></div>
-        <div style="flex:0"><button class="ghost" onclick="scanEvents()">用它跑一遍事件检测</button></div>
+        <div style="flex:0"><button class="ghost" onclick="scanEvents()">状态机扫描并生成回溯窗口</button></div>
       </div>
       <div class="msg" id="lmMsg"></div>
     </div>
 
     <div class="card" style="margin-top:14px">
-      <h2>② 小地图颜色调试 <span class="pill" id="mmPill">未标定</span></h2>
+      <h2>③ 小地图头像逐一匹配 <span class="pill" id="mmPill">未标定</span></h2>
       <p class="tip" style="margin-top:0">
-标好「小地图」那一项之后，点下面的按钮试一次。
-系统会在图上把认出来的人用小圆点标出来。
-<b>每方最多 5 个</b> —— 认出超过 5 个说明阈值太松，会被判为不可用。
+先标好「小地图」和左右两侧十个英雄头像。系统用颜色找候选，
+再把<b>每个侧边头像逐一与小地图头像比较</b>；未通过相似度门槛的点不显示，
+不会再按位置顺序硬猜 1~5 号位。圆点中的数字就是英雄槽位。
       </p>
       <div class="row">
         <div><label>蓝 最低B</label><input type="number" id="blueMinB"></div>
@@ -156,8 +157,7 @@ const $ = id => document.getElementById(id);
 let GAME='', FRAMES=[], CURRENT=null, REGIONS={}, ACTIVE=null, SPECS={}, LAST=null, PROFILES={};
 let LANDMARKS={}, LM_ACTIVE=null;
 
-// 要标哪些地标。塔的数量按「每路 2 座 + 3 座高地」算，
-// 具体几座取决于版本 —— 少标几座不影响，标了的那些就能测。
+// 每方三路各有一塔、二塔、高地塔；旧版单个高地塔由后端迁到中路。
 function landmarkPlan(){
   const out=[];
   const lanes=[['top','对抗路'],['mid','中路'],['bot','发育路']];
@@ -167,12 +167,24 @@ function landmarkPlan(){
         out.push({name:`${side}_${lane}_t${n}`, kind:'tower', teamId:team,
                   label:`${sideName}${laneName}${n}塔`});
   for(const [side,sideName,team] of [['blue','蓝方',100],['red','红方',200]])
-    out.push({name:`${side}_hg`, kind:'tower', teamId:team, label:`${sideName}高地塔`});
-  out.push({name:'tyrantPit', kind:'objective', label:'暴君坑（下路河道）'});
-  out.push({name:'overlordPit', kind:'objective', label:'主宰坑（上路河道）'});
-  for(let s=1;s<=10;s++)
+    for(const [lane,laneName] of lanes)
+      out.push({name:`${side}_${lane}_hg`, kind:'tower', teamId:team,
+                label:`${sideName}${laneName}高地塔`});
+  out.push({name:'tyrantPit', kind:'objective', label:'暴君/暗影暴君坑（下路河道）'});
+  out.push({name:'overlordPit', kind:'objective', label:'主宰/暗影主宰坑（上路河道）'});
+  out.push({name:'stormDragonLowerPit', kind:'storm_objective',
+            label:'风暴龙王候选框（下路龙坑）'});
+  out.push({name:'stormDragonUpperPit', kind:'storm_objective',
+            label:'风暴龙王候选框（上路龙坑）'});
+  for(let s=1;s<=10;s++){
+    const blue=s<=5, side=blue?'蓝':'红', pos=(s-1)%5+1;
     out.push({name:`portrait${s}`, kind:'portrait', slot:s,
-              label:`${s<=5?'蓝':'红'}${(s-1)%5+1} 头像`});
+              label:`${side}${pos} 头像`});
+    out.push({name:`ultimate${s}`, kind:'ultimate', slot:s,
+              label:`${side}${pos} 大招绿点（${blue?'头像左上角':'头像右上角'}）`});
+    out.push({name:`summoner${s}`, kind:'summoner', slot:s,
+              label:`${side}${pos} 召唤师技能（${blue?'头像右侧':'头像左侧'}）`});
+  }
   return out;
 }
 const LM_PLAN = landmarkPlan();
@@ -223,10 +235,19 @@ async function saveLm(){
   if(res.ok) renderLm();
 }
 async function scanEvents(){
-  msg('lmMsg','正在逐帧比对图标…','ok');
-  const res=await api('/api/events/scan',{gameId:GAME});
+  msg('lmMsg','正在运行固定地标状态机、遮挡过滤与多信号检查…','ok');
+  const res=await api('/api/events/scan',{gameId:GAME,refine:true,profile:profileName(),step:0.5});
   if(!res.ok){ msg('lmMsg',res.error,'err'); return; }
   const lines=[`${res.frameCount} 帧，检测到 ${res.events.length} 个事件：`];
+  lines.push(res.gameClockMapped
+    ? `已按比赛计时校正录像偏移 ${res.sourceToGameOffsetSec} 秒。`
+    : '尚无足够比赛计时，暂按录像时间；先运行自动识别可排除较长赛前画面。');
+  lines.push(`已忽略比赛前 ${res.ignoredBeforeSec||10} 秒的 ${res.ignoredOpeningFrames||0} 帧。`);
+  if(res.occlusions&&res.occlusions.length) lines.push(`已排除 ${res.occlusions.length} 次短暂遮挡。`);
+  if(res.refinementWindows&&res.refinementWindows.length)
+    lines.push(`生成 ${res.refinementWindows.length} 个事后高帧率回溯窗口。`);
+  if(res.towerRefine&&res.towerRefine.ok)
+    lines.push(`已完成 ${res.towerRefine.refined||0} 个推塔窗口的高帧率回溯。`);
   for(const e of res.events.slice(0,12)){
     const side={100:'蓝方',200:'红方'}[e.teamId]||'归属不明';
     const c=Math.floor(e.atSec/60), s=Math.floor(e.atSec%60);
@@ -289,12 +310,22 @@ const FULL_LIST = [
   ['redGold','红方总经济',''],
   ['blueKills','蓝方击杀',''],
   ['redKills','红方击杀',''],
+  ['banner','播报总范围','事件辅助验证；不能代替固定地标状态机'],
+  ['bannerKiller','播报·击败者','击败者头像或名称'],
+  ['bannerTarget','播报·被击败/被摧毁者','英雄或防御塔'],
+  ['bannerObjective','播报·龙种类','暴君/主宰/风暴龙王'],
+  ['bannerAssists','播报·助攻','密集团战时单独保留'],
   ['minimap','小地图','十个人的位置。没有它就答不了「入侵值不值」'],
 ];
 const POV_LIST = [
   ['clock','比赛计时','单人视角唯一强制项'],
   ['allyKills','己方击杀','不会在未确认阵营时冒充蓝方'],
   ['enemyKills','敌方击杀','不会在未确认阵营时冒充红方'],
+  ['banner','播报总范围','事件辅助验证'],
+  ['bannerKiller','播报·击败者',''],
+  ['bannerTarget','播报·被击败/被摧毁者',''],
+  ['bannerObjective','播报·龙种类',''],
+  ['bannerAssists','播报·助攻',''],
   ['minimap','小地图','十个人的位置，需要另外核对颜色阈值'],
 ];
 function currentList(){ return $('profileMode').value==='player_pov' ? POV_LIST : FULL_LIST; }
@@ -371,7 +402,9 @@ function drawOverlay(){
   for(const [n,v] of Object.entries(LANDMARKS)){
     const spec=LM_PLAN.find(l=>l.name===n);
     const col = spec && spec.kind==='portrait' ? '#4ade80'
-              : spec && spec.kind==='objective' ? '#a78bfa' : '#22d3ee';
+              : spec && spec.kind==='ultimate' ? '#22c55e'
+              : spec && spec.kind==='summoner' ? '#fb923c'
+              : spec && (spec.kind==='objective'||spec.kind==='storm_objective') ? '#a78bfa' : '#22d3ee';
     parts.push(`<div class="box" style="left:${v.box[0]*100}%;top:${v.box[1]*100}%;
       width:${v.box[2]*100}%;height:${v.box[3]*100}%;border-color:${col};
       background:${col}22"></div>`);
@@ -379,8 +412,8 @@ function drawOverlay(){
   if(LAST && LAST.usable && REGIONS.minimap){
     const m=REGIONS.minimap;
     for(const side of ['blue','red']) for(const d of LAST[side]){
-      parts.push(`<div class="dot" style="left:${(m[0]+d.x*m[2])*100}%;
-        top:${(m[1]+d.y*m[3])*100}%;background:${side==='blue'?'#3b82f6':'#ef4444'}"></div>`);
+      parts.push(`<div class="dot" title="槽位 ${d.slot||'?'}，置信度 ${d.confidence||''}" style="left:${(m[0]+d.x*m[2])*100}%;
+        top:${(m[1]+d.y*m[3])*100}%;background:${side==='blue'?'#3b82f6':'#ef4444'}">${d.slot||''}</div>`);
     }
   }
   $('overlay').innerHTML=parts.join('');
@@ -407,7 +440,7 @@ async function tryMinimap(){
   const r = res.result;
   LAST = {blue:r.blue, red:r.red, usable:r.quality.usable};
   drawOverlay();
-  const head = `认出蓝方 ${r.blueCount} 个、红方 ${r.redCount} 个，置信度 ${r.quality.confidence}`;
+  const head = `${r.method==='portrait-template'?'头像逐一匹配':'颜色候选'}：蓝方 ${r.blueCount} 个、红方 ${r.redCount} 个，置信度 ${r.quality.confidence}`;
   const body2 = r.quality.problems.length ? '\n' + r.quality.problems.map(p=>'· '+p).join('\n') : '';
   msg('mmMsg', head + body2, r.quality.usable ? 'ok' : 'err');
   $('mmSave').disabled = !r.quality.usable;

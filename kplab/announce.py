@@ -51,6 +51,20 @@ from .rules import BLUE, RED
 
 # 播报区在 HUD 标定里的键名。屏幕中间上方那一条。
 BANNER_REGION = "banner"
+BANNER_FIELD_REGIONS = {
+    "killer": "bannerKiller",
+    "target": "bannerTarget",
+    "objective": "bannerObjective",
+    "assists": "bannerAssists",
+}
+
+OBJECTIVE_WORDS = (
+    ("风暴龙王", "STORM_DRAGON_KILL"),
+    ("暗影暴君", "DARK_TYRANT_KILL"),
+    ("暗影主宰", "PROPHET_OVERLORD_KILL"),
+    ("暴君", "TYRANT_KILL"),
+    ("主宰", "OVERLORD_KILL"),
+)
 
 # 播报区和「什么都没有」比，变化超过这个值就认为横幅出现了。
 # 凭经验定的起点，需要用真实画面标定。
@@ -59,6 +73,34 @@ BANNER_THRESHOLD = 0.10
 # 蓝红两个通道差多少才算「明显偏向一方」。
 # 定得保守一点：宁可判不出来，也不要判错。
 TINT_MARGIN = 12.0
+
+
+def parse_fields(raw: dict[str, Any]) -> dict[str, Any]:
+    """把四个已标定播报子区域整理成结构化佐证。
+
+    OCR/头像识别读不清时字段保持 ``None``。尤其不能把一条很长的团战播报
+    强行拆给某个事件；原始文字始终保留，便于人工复核。
+    """
+    texts = {key: str(raw.get(region) or "").strip()
+             for key, region in BANNER_FIELD_REGIONS.items()}
+    objective_type = None
+    objective_text = texts["objective"]
+    for word, event_type in OBJECTIVE_WORDS:
+        if word in objective_text:
+            objective_type = event_type
+            break
+    assists = [part.strip() for part in
+               texts["assists"].replace("、", ",").replace("/", ",").split(",")
+               if part.strip()]
+    return {
+        "killer": texts["killer"] or None,
+        "target": texts["target"] or None,
+        "objective": objective_text or None,
+        "objectiveType": objective_type,
+        "assists": assists,
+        "raw": texts,
+        "complete": bool(texts["killer"] and (texts["target"] or objective_type)),
+    }
 
 
 def bracket_events(
@@ -216,6 +258,7 @@ def refine(
     banner_box: tuple[float, float, float, float] | None,
     quiet_baseline: dict[str, float] | None = None,
     step_sec: float = 1.5,
+    source_offset_sec: float = 0.0,
 ) -> dict[str, Any]:
     """对粗扫出来的事件逐个回到区间里找播报，补上归属。
 
@@ -266,7 +309,8 @@ def refine(
             # 拿区间起点那一帧当空白基准
             try:
                 shot = source.parent / f".baseline_{int(group['fromSec'])}.jpg"
-                video.crop_region(source, shot, group["fromSec"], banner_box, scale_width=240)
+                video.crop_region(source, shot, group["fromSec"] + source_offset_sec,
+                                  banner_box, scale_width=240)
                 window_baseline = events_cv.read_patch(shot, (0.0, 0.0, 1.0, 1.0), size=32)
                 shot.unlink(missing_ok=True)
             except Exception as err:      # noqa: BLE001
@@ -275,7 +319,9 @@ def refine(
                 refined.extend(group["events"])
                 continue
 
-        found = scan_window(source, banner_box, group["fromSec"], group["toSec"],
+        found = scan_window(source, banner_box,
+                            group["fromSec"] + source_offset_sec,
+                            group["toSec"] + source_offset_sec,
                             window_baseline, step_sec)
         if not found["found"]:
             for event in group["events"]:
