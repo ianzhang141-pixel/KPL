@@ -98,6 +98,15 @@
   .ver { color:#5b6373; font-size:11px; border:1px solid #232935; border-radius:99px;
          padding:1px 8px; margin-left:6px; }
 
+  .slots { width:100%; border-collapse:collapse; font-size:11.5px; margin-top:10px; }
+  .slots th, .slots td { text-align:left; padding:4px 6px; border-bottom:1px solid #1c212a; }
+  .slots th { color:#8b93a1; font-weight:600; }
+  .slots td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .slots tr.ok td { color:#86efac; }
+  .slots tr.near td { color:#fcd34d; }
+  .slots tr.far td { color:#8b93a1; }
+  .slots .why { color:#5b6373; }
+
   .fields { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
   @media (max-width:520px){ .fields{grid-template-columns:1fr 1fr;} }
   .fields .f label { font-size:11px; }
@@ -231,6 +240,13 @@
 挑出这些像素后，系统把<b>挨在一起的</b>归成一团，一团就是一个人。
 「一团最少/最多多少像素」用来把噪点（太小）和大片地图底色（太大）扔掉。
 
+<b>龙的图标为什么会被当成英雄：</b>它也是一个带亮边框的圆形头像，
+天生就长得像「某个英雄」，而且它一直待在那儿。
+所以只要你在上面「地标」那一栏把<b>暴君坑、主宰坑、风暴龙王候选坑</b>框好，
+系统就知道那几个位置蹲着一个长得像英雄的东西，会对那里的候选<b>额外提高门槛</b>——
+真有人站在龙坑上，头像匹配够强照样认得出来；只是龙本身过不去了。
+没标这几个框的话，这一类误检挡不住。
+
 怎么调：<b>认出来的人太少 → 把数字调小（放松）；超过 5 个 → 调大（收紧）。</b>
 每改一次都点「试一次」看图上的圆点对不对，对了再点最下面那个按钮存起来。</div>
       </details>
@@ -252,6 +268,16 @@
           <p class="help">红 − 绿 至少这么多。挡掉橙色和黄色。</p></div>
       </div>
       <div class="fields" style="margin-top:10px">
+        <div class="f"><label>头像相似度门槛</label>
+          <input type="number" id="minSimilarity" step="0.01" min="0.3" max="0.99">
+          <p class="help">0.30~0.99，默认 0.80。<b>调低认出的人更多，也开始把地图纹理当人。</b>
+            对着真画面调：看下面的表，把门槛卡在「真人」和「不是人」之间。</p></div>
+        <div class="f" style="grid-column:span 2;display:flex;align-items:flex-end">
+          <p class="help" style="margin:0">这个门槛<b>没有在真实录像上校准过</b> ——
+            我给不出一个「正确值」，只能把每个人的实际分数摊开给你看，由你拿真画面定。
+            定完记得点最下面的按钮存起来。</p></div>
+      </div>
+      <div class="fields" style="margin-top:10px">
         <div class="f"><label>一团最少多少像素</label><input type="number" id="minBlobPixels">
           <p class="help">小于这个的当噪点丢掉。小地图按 160×160 算。</p></div>
         <div class="f"><label>一团最多多少像素</label><input type="number" id="maxBlobPixels">
@@ -262,6 +288,7 @@
       </div>
 
       <div class="msg" id="mmMsg"></div>
+      <div id="slotReport"></div>
       <div class="row" style="margin-top:8px">
         <div style="flex:0"><button class="ghost" id="mmSave" onclick="saveMinimap()" disabled>
           结果对的话，标记为已标定</button></div>
@@ -545,6 +572,8 @@ async function boot() {
   MM_DEFAULTS = st.minimapDefaults || {};
   const mm = st.minimap || {};
   MM_KEYS.forEach(k => { if(mm[k]!==undefined) $(k).value = mm[k]; });
+  if(mm.minSimilarity!==undefined) $('minSimilarity').value = mm.minSimilarity;
+  else if(st.minimapMinSimilarity!==undefined) $('minSimilarity').value = st.minimapMinSimilarity;
   $('mmPill').className = 'pill ' + (mm.verified?'on':'off');
   $('mmPill').textContent = mm.verified ? '已标定' : '未标定';
 
@@ -713,19 +742,24 @@ async function saveProfile(){
 
 function resetMinimap(){
   MM_KEYS.forEach(k=>{ if(MM_DEFAULTS[k]!==undefined) $(k).value = MM_DEFAULTS[k]; });
+  if(MM_DEFAULTS.minSimilarity!==undefined) $('minSimilarity').value = MM_DEFAULTS.minSimilarity;
   msg('mmMsg','已填回出厂默认值。还没生效 —— 点「试一次」看效果，满意再存。','warn');
 }
 
 async function tryMinimap(){
   if(!REGIONS.minimap){ msg('mmMsg','先标定「小地图」那一项。','err'); return; }
   if(!CURRENT){ msg('mmMsg','先选一张帧图。','err'); return; }
+  msg('mmMsg','正在逐个头像比对…（要几秒）','ok');
+  $('slotReport').innerHTML='';
   const body = {gameId:GAME, file:CURRENT.file, box:REGIONS.minimap};
   MM_KEYS.forEach(k=>{ if($(k).value!=='') body[k]=$(k).value; });
+  if($('minSimilarity').value!=='') body.minSimilarity=$('minSimilarity').value;
   const res = await api('/api/minimap/detect', body);
   if(!res.ok){ msg('mmMsg', res.error, 'err'); LAST=null; drawOverlay(); return; }
   const r = res.result;
   LAST = {blue:r.blue, red:r.red, usable:r.quality.usable};
   drawOverlay();
+  renderSlots(r);
   const head = `${r.method==='portrait-template'?'头像逐一匹配':'颜色候选'}：蓝方 ${r.blueCount} 个、红方 ${r.redCount} 个，置信度 ${r.quality.confidence}`;
   const tune = r.method==='portrait-template'
     ? '\n头像匹配会主动拒绝低相似候选；漏检先保留，不要为了凑齐10人放宽到产生假点。'
@@ -739,9 +773,48 @@ async function tryMinimap(){
   $('mmSave').disabled = !r.quality.usable;
 }
 
+// 十个槽位各自卡在哪一步。只说「认出 4 个」没法改进任何东西：
+// 是压根没找到圆形候选（人不在场上），还是找到了但差 0.02 分，
+// 要做的事完全不同。
+function renderSlots(r){
+  const slots = r.slots || [];
+  if(!slots.length){ $('slotReport').innerHTML=''; return; }
+  const need = r.minSimilarity || 0.8;
+  let nearMiss = 0;
+  const rows = slots.map(s=>{
+    const best = s.bestScore||0, want = s.needed||need;
+    // 只有「分数没到门槛」才是调门槛能救的。被别人占走、或者压根没候选，
+    // 调门槛不会有任何帮助 —— 标成黄色只会把人往错的方向引。
+    const tunable = s.status==='below_threshold' && best>0 && best >= want-0.08;
+    if(tunable) nearMiss++;
+    const cls = s.status==='matched' ? 'ok' : (tunable ? 'near' : 'far');
+    const gap = (s.status!=='matched' && best>0 && best<want)
+      ? `差 ${(want-best).toFixed(3)}` : '';
+    return `<tr class="${cls}">
+      <td>${s.teamId===100?'蓝':'红'}${((s.slot-1)%5)+1}</td>
+      <td class="num">${best?best.toFixed(3):'—'}</td>
+      <td class="num">${want.toFixed(2)}</td>
+      <td class="num">${gap}</td>
+      <td class="why">${esc(s.statusText||s.status)}${s.inStaticZone?'（在龙坑/塔的框里，门槛已调高）':''}</td>
+    </tr>`;
+  }).join('');
+  const extra = [];
+  if(r.candidateCount!==undefined) extra.push(`全图找到 ${r.candidateCount} 个圆形候选`);
+  if(r.staticZoneCount) extra.push(`${r.staticZoneCount} 个龙坑/塔的框已用于提防误检`);
+  if(r.staticZoneCandidates) extra.push(`其中 ${r.staticZoneCandidates} 个候选落在那些框里`);
+  $('slotReport').innerHTML =
+    `<table class="slots"><thead><tr><th>选手</th><th>最好分</th><th>需要</th>
+       <th>还差</th><th>卡在哪一步</th></tr></thead><tbody>${rows}</tbody></table>
+     <p class="help">${esc(extra.join('；'))}。${nearMiss
+       ? ` 黄色那 ${nearMiss} 个是<b>只差一点点分数</b>的 —— 把门槛往下调一点就能认出来，`
+         + `但请先看一眼图上那个点是不是真的站着人。`
+       : ' 没有靠调门槛就能救回来的 —— 调低只会开始把地图纹理当人。'}</p>`;
+}
+
 async function saveMinimap(){
   const t={};
   MM_KEYS.forEach(k=>{ if($(k).value!=='') t[k]=parseInt($(k).value,10); });
+  if($('minSimilarity').value!=='') t.minSimilarity=parseFloat($('minSimilarity').value);
   const res = await api('/api/minimap/save', {thresholds:t, verified:true});
   if(!res.ok){ msg('mmMsg', res.error, 'err'); return; }
   $('mmPill').className='pill on'; $('mmPill').textContent='已标定';

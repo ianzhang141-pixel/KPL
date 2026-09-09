@@ -920,6 +920,16 @@ def api_minimap_detect(body: dict[str, Any]) -> dict[str, Any]:
             except (TypeError, ValueError):
                 return {"ok": False, "error": f"{key} 必须是整数。"}
 
+    min_similarity = float(thresholds.get("minSimilarity",
+                                         minimap.DEFAULT_MIN_SIMILARITY))
+    if body.get("minSimilarity") is not None:
+        try:
+            min_similarity = float(body["minSimilarity"])
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "相似度门槛必须是数字。"}
+        if not 0.3 <= min_similarity <= 0.99:
+            return {"ok": False, "error": "相似度门槛只能在 0.30~0.99 之间。"}
+
     try:
         landmarks = events_cv.load_landmarks(data_dir).get("items", {})
         portrait_boxes = {
@@ -928,13 +938,25 @@ def api_minimap_detect(body: dict[str, Any]) -> dict[str, Any]:
             if item.get("kind") == events_cv.KIND_PORTRAIT
             and item.get("slot") is not None and hud.valid_box(item.get("box"))
         }
+        # 塔和资源坑是**长在地图上、不会走动**的东西。龙的图标本身就是一个
+        # 带亮边框的圆形头像，天生就像「某个英雄」。已经标好的这些框
+        # 正好告诉我们「哪里蹲着一个长得像英雄的东西」，那里就该要求更强的证据。
+        static_boxes = [
+            tuple(item["box"]) for item in landmarks.values()
+            if item.get("kind") in (events_cv.KIND_TOWER, events_cv.KIND_OBJECTIVE,
+                                    events_cv.KIND_STORM_OBJECTIVE)
+            and hud.valid_box(item.get("box"))
+        ]
         result = (
-            minimap.detect_with_portraits(image, tuple(box), portrait_boxes, thresholds)
+            minimap.detect_with_portraits(image, tuple(box), portrait_boxes, thresholds,
+                                          static_landmark_boxes=static_boxes,
+                                          min_similarity=min_similarity)
             if portrait_boxes else minimap.detect(image, tuple(box), thresholds)
         )
     except Exception as err:      # noqa: BLE001 - 标定页要看见失败原因
         return {"ok": False, "error": f"{type(err).__name__}: {err}"}
-    return {"ok": True, "result": result, "thresholds": thresholds}
+    return {"ok": True, "result": result, "thresholds": thresholds,
+            "minSimilarity": min_similarity}
 
 
 def api_landmarks_save(body: dict[str, Any]) -> dict[str, Any]:
