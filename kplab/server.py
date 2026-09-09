@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import statistics
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -1183,6 +1184,145 @@ def api_frames(game_id: str) -> dict[str, Any]:
             "progress": annotate.progress(data_dir, game_id)}
 
 
+def api_ocr_start(body: dict[str, Any]) -> dict[str, Any]:
+    """在后台对已抽取帧运行 OCR；整段录像不会被读取或保存。"""
+    data_dir = paths.ensure(_console().data_dir)
+    game_id = str(body.get("gameId") or "").strip()
+    if not store.valid_game_id(game_id) or not store.load_meta(data_dir, game_id):
+        return {"started": False, "reason": f"没有这场比赛：{game_id}"}
+
+    profile_name = str(body.get("profile") or "player_pov").strip()
+    profile = hud.get_profile(data_dir, profile_name)
+    verdict = hud.describe(profile)
+    if not profile or not verdict["ok"]:
+        return {"started": False, "reason": verdict["message"]}
+    backend = str(body.get("backend") or ocr.best_backend() or "").strip()
+    if not backend:
+        return {"started": False, "reason": "本机没有可用的自动识别后端。"}
+
+    frame_items = api_frames(game_id)["frames"]
+    selected = body.get("files")
+    if selected is not None:
+        if not isinstance(selected, list):
+            return {"started": False, "reason": "指定帧列表格式不正确。"}
+        allowed = {Path(str(name)).name for name in selected[:2000]}
+        frame_items = [item for item in frame_items if item["file"] in allowed]
+    if not frame_items:
+        return {"started": False, "reason": "这场比赛没有可识别的帧图。"}
+    force = bool(body.get("force"))
+
+    def work(log: Callable[[str], None]) -> None:
+        observations_path = store.observations_path(data_dir, game_id)
+        records = list(store.read_jsonl_gz(observations_path))
+        target_files = {item["file"] for item in frame_items}
+        if force:
+            kept = [
+                record for record in records
+                if not (record.get("generatedBy") == "ocr"
+                        and record.get("frameFile") in target_files
+                        and record.get("ocrProfile") == profile_name)
+            ]
+            removed = len(records) - len(kept)
+            if removed:
+                store.rewrite_jsonl_gz(observations_path, kept)
+                log(f"已替换 {removed} 条旧识别结果。")
+            records = kept
+        existing = {
+            (str(record.get("frameFile") or ""), str(record.get("ocrProfile") or ""),
+             str(record.get("ocrBackend") or ""))
+            for record in records
+            if record.get("generatedBy") == "ocr"
+        }
+        total = len(frame_items)
+        _console().progress(0, total)
+        saved = unknown_clock = clock_outliers = skipped = 0
+        rules_table = rules.load(data_dir)
+        frame_root = store.frames_dir(data_dir, game_id)
+        log(f"开始识别 {total} 张帧图；配置 {profile_name}，后端 {backend}。")
+        recognized: list[tuple[dict[str, Any], dict[str, Any], float]] = []
+        for index, item in enumerate(frame_items, 1):
+            if _console().cancelled():
+                log("任务已停止。")
+                break
+            name = item["file"]
+            if (name, profile_name, backend) in existing:
+                skipped += 1
+                _console().progress(index, total)
+                continue
+            result = ocr.read_regions(frame_root / name, profile, rules_table, backend)
+            clock_entry = result.get("clock")
+            at_sec = schema.get(clock_entry)
+            if at_sec is None:
+                unknown_clock += 1
+                _console().progress(index, total)
+                continue
+            recognized.append((item, result, float(at_sec)))
+            _console().progress(index, total)
+
+        # 同一连续片段里，“帧局部时间 - 游戏计时”的差应近似恒定。
+        # 用中位数找基准，不让单个 12:43→42:43 的错读把整场拖到错误时刻。
+        offsets = [float(item["atSec"]) - at_sec for item, _, at_sec in recognized]
+        clock_offset = statistics.median(offsets) if len(offsets) >= 5 else None
+        last_scores: dict[str, tuple[int, float]] = {}
+        for item, result, at_sec in recognized:
+            name = item["file"]
+            if clock_offset is not None:
+                offset = float(item["atSec"]) - at_sec
+                if abs(offset - clock_offset) > 10.0:
+                    clock_outliers += 1
+                    continue
+            warnings: dict[str, str] = {}
+            for key in ("allyKills", "enemyKills", "blueKills", "redKills"):
+                entry = result.get(key)
+                if not isinstance(entry, dict):
+                    continue
+                previous = last_scores.get(key)
+                guarded, warning = ocr.guard_score_sequence(
+                    entry, previous[0] if previous else None,
+                    at_sec - previous[1] if previous else 0.0,
+                )
+                result[key] = guarded
+                if warning:
+                    warnings[key] = warning
+                if schema.is_known(guarded) and schema.conf(guarded) >= schema.TRUST_THRESHOLD:
+                    last_scores[key] = (int(schema.get(guarded)), at_sec)
+            fields = {
+                key: value for key, value in result.items()
+                if not key.startswith("_") and isinstance(value, dict)
+            }
+            store.append_jsonl_gz(observations_path, {
+                "atSec": round(float(at_sec), 2),
+                "frameFile": name,
+                "fields": fields,
+                "players": {},
+                "events": [],
+                "observedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "generatedBy": "ocr",
+                "ocrBackend": backend,
+                "ocrProfile": profile_name,
+                "ocrRaw": result.get("_raw", {}),
+                "ocrErrors": result.get("_errors", {}),
+                "ocrWarnings": warnings,
+            })
+            existing.add((name, profile_name, backend))
+            saved += 1
+            _console().progress(index, total)
+        store.create_game(data_dir, game_id, {"ocrLastRun": {
+            "profile": profile_name, "backend": backend, "requested": total,
+            "saved": saved, "unknownClock": unknown_clock,
+            "clockOutliers": clock_outliers, "skipped": skipped,
+            "estimatedClockOffsetSec": round(clock_offset, 2) if clock_offset is not None else None,
+            "attemptedFiles": sorted(target_files),
+            "finishedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }})
+        log(f"识别完成：保存 {saved} 张，时间漏读 {unknown_clock} 张，"
+            f"时间异常拒绝 {clock_outliers} 张，重复跳过 {skipped} 张。")
+
+    started = _console().start_job(f"自动识别：{game_id}", work)
+    return {**started, "gameId": game_id, "profile": profile_name,
+            "backend": backend, "frameCount": len(frame_items)}
+
+
 def api_state(game_id: str) -> dict[str, Any]:
     data_dir = _console().data_dir
     if not store.valid_game_id(game_id):
@@ -1274,6 +1414,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/game/batch-create": api_create_batch,
             "/api/game/delete": api_delete_game,
             "/api/annotate": api_annotate,
+            "/api/ocr/start": api_ocr_start,
             "/api/rules": api_save_rule,
             "/api/profile": api_save_profile,
             "/api/state/build": api_build_state,

@@ -257,6 +257,7 @@
     <thead><tr><th>比赛</th><th>样本类型</th><th>重点对象</th><th>帧图</th><th>标注</th><th>观测</th><th>胜负</th><th></th></tr></thead>
     <tbody id="gameRows"><tr><td colspan="8" style="color:#8b93a1">还没有比赛。</td></tr></tbody>
   </table>
+  <div class="msg" id="ocrMsg"></div>
 </div>
 
 <div class="card">
@@ -763,6 +764,8 @@ async function refresh() {
       <td>${g.observationCount || '—'}</td>
       <td>${g.blueWin === true ? '蓝胜' : g.blueWin === false ? '红胜' : '<span class="warn">未记录</span>'}</td>
       <td>
+        <button class="ghost" onclick="runOcr('${safe(g.gameId)}','${safe(g.sampleType)}')">自动识别</button> ·
+        <button class="ghost" onclick="showEvaluation('${safe(g.gameId)}')">准确率</button> ·
         <a href="/annotate?game=${encodeURIComponent(g.gameId)}">标注</a> ·
         <a href="/debug?game=${encodeURIComponent(g.gameId)}">核对</a>
       </td>
@@ -828,6 +831,23 @@ async function extract() {
   $('jobLog').style.display = 'block';
   if (jobTimer) clearInterval(jobTimer);
   jobTimer = setInterval(pollJob, 900);
+}
+async function runOcr(gameId, sampleType) {
+  const profile = ['pro_player_ranked','top_player_ranked'].includes(sampleType)
+    ? 'player_pov' : 'kpl_broadcast';
+  const res = await api('/api/ocr/start', {gameId, profile});
+  if (!res.started) { msg('exMsg', res.reason || '自动识别启动失败。', 'err'); return; }
+  msg('exMsg', `已开始识别 ${res.frameCount} 张帧图；结果会保留来源和置信度。`, 'ok');
+  $('jobLog').style.display = 'block';
+  if (jobTimer) clearInterval(jobTimer);
+  jobTimer = setInterval(pollJob, 900);
+  await pollJob();
+}
+async function showEvaluation(gameId) {
+  const res = await api('/api/evaluate/' + encodeURIComponent(gameId));
+  const verdict = res.verdict || {};
+  msg('ocrMsg', `${gameId}\n${verdict.summary || res.error || '暂无评估结果。'}`,
+      verdict.ok ? 'ok' : 'warn');
 }
 async function pollJob() {
   const job = await api('/api/job');

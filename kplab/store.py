@@ -37,8 +37,13 @@ import gzip
 import json
 import re
 import shutil
+import threading
 from pathlib import Path
 from typing import Any, Iterator
+
+
+# ThreadingHTTPServer 会并行处理请求；gzip 追加不是线程安全的，同一文件同时写会损坏压缩流。
+_APPEND_LOCK = threading.Lock()
 
 from . import paths
 
@@ -110,8 +115,9 @@ def append_jsonl_gz(path: Path, record: dict[str, Any]) -> Path:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(record, ensure_ascii=False) + "\n"
-    with gzip.open(path, "at", encoding="utf-8", compresslevel=6) as handle:
-        handle.write(line)
+    with _APPEND_LOCK:
+        with gzip.open(path, "at", encoding="utf-8", compresslevel=6) as handle:
+            handle.write(line)
     return path
 
 
@@ -133,12 +139,13 @@ def read_jsonl_gz(path: Path) -> Iterator[dict[str, Any]]:
 
 def rewrite_jsonl_gz(path: Path, records: list[dict[str, Any]]) -> Path:
     """整份重写。只在「删除某场的某些标注」这种场合用，正常流程一律追加。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with gzip.open(tmp, "wt", encoding="utf-8", compresslevel=6) as handle:
-        for record in records:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-    tmp.replace(path)
+    with _APPEND_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with gzip.open(tmp, "wt", encoding="utf-8", compresslevel=6) as handle:
+            for record in records:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        tmp.replace(path)
     return path
 
 

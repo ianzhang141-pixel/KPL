@@ -33,6 +33,7 @@ OCR 把 `8` 读成 `9` 是最常见的错误，读出来的还是一个合法数
 from __future__ import annotations
 
 import re
+import math
 import shutil
 import subprocess
 from pathlib import Path
@@ -238,9 +239,13 @@ def read_regions(
         if not spec or spec["read"] == "minimap":
             continue        # 小地图不是 OCR 的事，见 minimap_note()
         crop = tmp_dir / f"{image.stem}__{key}.png"
+        confidence_cap: float | None = None
         try:
             video.crop_region(image, crop, 0.0, tuple(box), scale_width=320)
-            text = reader(crop)
+            if backend == "tesseract" and key.endswith("Kills"):
+                text, confidence_cap = _tesseract_score_read(crop)
+            else:
+                text = reader(crop)
         except Exception as err:   # noqa: BLE001 - 单个区域失败不该毁掉整帧
             out[key] = schema.unknown()
             out.setdefault("_errors", {})[key] = str(err)[:160]  # type: ignore[index]
@@ -259,6 +264,9 @@ def read_regions(
         else:
             value, confidence = parse_int(text)
 
+        if confidence_cap is not None:
+            confidence = min(confidence, confidence_cap)
+
         out[key] = (
             schema.field(value, schema.SOURCE_OCR, confidence)
             if value is not None else schema.unknown()
@@ -272,18 +280,73 @@ def read_regions(
     return out
 
 
-def _tesseract_read(image: Path) -> str:
+def _tesseract_read(image: Path, psm: int = 7) -> str:
     exe = _which("tesseract")
     if not exe:
         raise OcrError("tesseract 不在 PATH 里。")
     result = subprocess.run(
-        [exe, str(image), "stdout", "--psm", "7",
+        [exe, str(image), "stdout", "--psm", str(psm),
          "-c", "tessedit_char_whitelist=0123456789:./万wW"],
         capture_output=True, text=True, timeout=60, check=False,
     )
     if result.returncode != 0:
         raise OcrError(result.stderr.strip()[:200] or "tesseract 执行失败")
     return result.stdout.strip()
+
+
+def _choose_score_read(raw: str, enhanced: str) -> tuple[str, float]:
+    """双路识别一致才给可信置信度；单路结果只作为人工草稿。"""
+    raw_value, _ = parse_int(raw, lo=0, hi=200)
+    enhanced_value, _ = parse_int(enhanced, lo=0, hi=200)
+    if raw_value is not None and raw_value == enhanced_value:
+        return str(raw_value), 0.85
+    if enhanced_value is not None:
+        return str(enhanced_value), 0.45
+    if raw_value is not None:
+        return str(raw_value), 0.4
+    return "", 0.0
+
+
+def guard_score_sequence(
+    entry: dict[str, Any], previous_value: int | None, elapsed_sec: float
+) -> tuple[dict[str, Any], str | None]:
+    """拒绝比分倒退或短时间内不可能的大跳变，不擅自改成猜测值。"""
+    if not schema.is_known(entry) or schema.conf(entry) < schema.TRUST_THRESHOLD:
+        return entry, None
+    value = schema.get(entry)
+    if not isinstance(value, int) or previous_value is None:
+        return entry, None
+    if value < previous_value:
+        return schema.field(value, schema.SOURCE_OCR, 0.3), "比分倒退，已降为存疑"
+    # 一次团灭最多贡献5个人头；较长间隔按每30秒再放宽5个，避免过度拒绝。
+    allowed_jump = 5 * max(1, math.ceil(max(0.0, elapsed_sec) / 30.0))
+    if value - previous_value > allowed_jump:
+        return schema.field(value, schema.SOURCE_OCR, 0.3), "比分短时间异常跳变，已降为存疑"
+    return entry, None
+
+
+def _tesseract_score_read(image: Path) -> tuple[str, float]:
+    """针对带描边的小比分跑原图 + 灰度增强两路识别。"""
+    raw = _tesseract_read(image, psm=10)
+    ffmpeg = _which("ffmpeg")
+    if not ffmpeg:
+        return _choose_score_read(raw, "")
+    enhanced_path = image.with_name(image.stem + "__score_gray.png")
+    try:
+        result = subprocess.run(
+            [ffmpeg, "-nostdin", "-loglevel", "error", "-i", str(image),
+             "-frames:v", "1", "-vf",
+             "scale=240:-2,format=gray,eq=contrast=2:brightness=0.1",
+             "-y", str(enhanced_path)],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        enhanced = (
+            _tesseract_read(enhanced_path, psm=10)
+            if result.returncode == 0 and enhanced_path.is_file() else ""
+        )
+    finally:
+        enhanced_path.unlink(missing_ok=True)
+    return _choose_score_read(raw, enhanced)
 
 
 def _paddle_read(image: Path) -> str:

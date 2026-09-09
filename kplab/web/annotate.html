@@ -123,6 +123,11 @@ LOL 那个项目就是把先锋和幼虫算进了大龙，训出来的模型是�
         <div><label>蓝方已拆塔</label><input type="number" id="blueTowers"></div>
         <div><label>红方已拆塔</label><input type="number" id="redTowers"></div>
       </div>
+      <p class="tip">单人视角不确定出生阵营时，只填下面的己方/敌方；不要猜蓝红方。</p>
+      <div class="row">
+        <div><label>己方击杀（单人视角）</label><input type="number" id="allyKills"></div>
+        <div><label>敌方击杀（单人视角）</label><input type="number" id="enemyKills"></div>
+      </div>
     </div>
 
     <div class="card" style="margin-top:14px">
@@ -427,7 +432,8 @@ function pickFrame(i) {
 }
 
 function clearForm() {
-  ['blueGold','redGold','blueKills','redKills','blueTowers','redTowers'].forEach(k => $(k).value = '');
+  ['blueGold','redGold','blueKills','redKills','blueTowers','redTowers',
+   'allyKills','enemyKills'].forEach(k => $(k).value = '');
   for (let s = 1; s <= 10; s++) {
     ['level','k','d','a','x','y'].forEach(f => $(f + s).value = '');
     $('pos'+s).textContent = '—'; $('pos'+s).style.color = '#5b6373';
@@ -446,7 +452,8 @@ async function save() {
     return;
   }
   const payload = {players: {}, events: []};
-  ['blueGold','redGold','blueKills','redKills','blueTowers','redTowers'].forEach(k => {
+  ['blueGold','redGold','blueKills','redKills','blueTowers','redTowers',
+   'allyKills','enemyKills'].forEach(k => {
     if ($(k).value !== '') payload[k] = $(k).value;
   });
   for (let s = 1; s <= 10; s++) {

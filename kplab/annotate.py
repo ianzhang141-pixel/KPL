@@ -39,6 +39,9 @@ NUMERIC_FIELDS: dict[str, dict[str, Any]] = {
     "redGold": {"label": "红方总经济", "lo": 0, "hi": 300000, "scope": "team"},
     "blueKills": {"label": "蓝方击杀", "lo": 0, "hi": 200, "scope": "team"},
     "redKills": {"label": "红方击杀", "lo": 0, "hi": 200, "scope": "team"},
+    # 单人直播视角通常只显示“我方/敌方”，不能在不知道出生阵营时硬映射成蓝/红。
+    "allyKills": {"label": "己方击杀", "lo": 0, "hi": 200, "scope": "relative_team"},
+    "enemyKills": {"label": "敌方击杀", "lo": 0, "hi": 200, "scope": "relative_team"},
     "blueTowers": {"label": "蓝方已拆塔数", "lo": 0, "hi": 20, "scope": "team"},
     "redTowers": {"label": "红方已拆塔数", "lo": 0, "hi": 20, "scope": "team"},
 }

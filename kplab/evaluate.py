@@ -32,10 +32,13 @@ from . import schema, store
 
 # 各字段允许的「接近」范围。经济数字大，允许相对误差；等级和比分必须完全对。
 TOLERANCE: dict[str, dict[str, Any]] = {
+    "clock": {"abs": 0, "label": "比赛计时"},
     "blueGold": {"rel": 0.03, "label": "蓝方经济"},
     "redGold": {"rel": 0.03, "label": "红方经济"},
     "blueKills": {"abs": 0, "label": "蓝方击杀"},
     "redKills": {"abs": 0, "label": "红方击杀"},
+    "allyKills": {"abs": 0, "label": "己方击杀"},
+    "enemyKills": {"abs": 0, "label": "敌方击杀"},
     "level": {"abs": 0, "label": "等级"},
     "kills": {"abs": 0, "label": "击杀"},
     "deaths": {"abs": 0, "label": "死亡"},
@@ -57,6 +60,13 @@ def _close(field_name: str, truth: Any, guess: Any) -> bool:
 
 def _index_by_time(records: list[dict[str, Any]]) -> dict[float, dict[str, Any]]:
     return {round(float(r.get("atSec") or 0.0), 1): r for r in records}
+
+
+def _index_by_frame(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        str(record["frameFile"]): record for record in records
+        if record.get("frameFile")
+    }
 
 
 def _flatten(record: dict[str, Any]) -> dict[str, Any]:
@@ -113,18 +123,29 @@ def run(data_dir: Path, game_id: str) -> dict[str, Any]:
         return report
 
     truth_by_time = _index_by_time(annotations)
+    truth_by_frame = _index_by_frame(annotations)
     compared = exact = close = 0
+    trusted_compared = trusted_exact = trusted_close = 0
     misses = 0
     per_field: dict[str, dict[str, Any]] = {}
     examples: list[dict[str, Any]] = []
 
     for record in machine:
         at = round(float(record.get("atSec") or 0.0), 1)
-        truth_record = truth_by_time.get(at)
+        # OCR 最容易读错的恰好是计时器。若先按 OCR 时间找人工真值，错时钟会被
+        # 静默跳过，准确率反而变高。优先以同一张帧图配对，旧数据才按时间兜底。
+        truth_record = truth_by_frame.get(str(record.get("frameFile") or ""))
+        matched_by_frame = truth_record is not None
+        if truth_record is None:
+            truth_record = truth_by_time.get(at)
         if truth_record is None:
             continue      # 这一帧没有人工标注，无从比较
         truth_fields = _flatten(truth_record)
         guess_fields = _flatten(record)
+        if matched_by_frame and "clock" in guess_fields:
+            truth_fields["clock"] = schema.field(
+                float(truth_record.get("atSec") or 0.0), schema.SOURCE_MANUAL
+            )
 
         for path, truth_entry in truth_fields.items():
             if not schema.is_known(truth_entry):
@@ -134,7 +155,9 @@ def run(data_dir: Path, game_id: str) -> dict[str, Any]:
             bucket = per_field.setdefault(
                 name,
                 {"label": (TOLERANCE.get(name) or {}).get("label", name),
-                 "compared": 0, "exact": 0, "close": 0, "missed": 0},
+                 "compared": 0, "exact": 0, "close": 0, "missed": 0,
+                 "trustedCompared": 0, "trustedExact": 0, "trustedClose": 0,
+                 "lowConfidence": 0},
             )
             if not schema.is_known(guess_entry):
                 misses += 1
@@ -143,16 +166,30 @@ def run(data_dir: Path, game_id: str) -> dict[str, Any]:
 
             truth_value = schema.get(truth_entry)
             guess_value = schema.get(guess_entry)
+            trusted = schema.conf(guess_entry) >= schema.TRUST_THRESHOLD
             compared += 1
             bucket["compared"] += 1
+            if trusted:
+                trusted_compared += 1
+                bucket["trustedCompared"] += 1
+            else:
+                bucket["lowConfidence"] += 1
             if truth_value == guess_value:
                 exact += 1
                 close += 1
                 bucket["exact"] += 1
                 bucket["close"] += 1
+                if trusted:
+                    trusted_exact += 1
+                    trusted_close += 1
+                    bucket["trustedExact"] += 1
+                    bucket["trustedClose"] += 1
             elif _close(name, truth_value, guess_value):
                 close += 1
                 bucket["close"] += 1
+                if trusted:
+                    trusted_close += 1
+                    bucket["trustedClose"] += 1
                 if len(examples) < 30:
                     examples.append({"clock": _clock(at), "field": path,
                                      "truth": truth_value, "guess": guess_value, "level": "接近"})
@@ -161,10 +198,41 @@ def run(data_dir: Path, game_id: str) -> dict[str, Any]:
                     examples.append({"clock": _clock(at), "field": path,
                                      "truth": truth_value, "guess": guess_value, "level": "错"})
 
+    # 若某张已尝试的帧连计时都没读出，它不会进入 observations。不能因此从
+    # 覆盖率分母消失；否则识别越差、整条记录越少，表面覆盖率反而越高。
+    last_run = (store.load_meta(data_dir, game_id) or {}).get("ocrLastRun") or {}
+    attempted_files = {str(name) for name in (last_run.get("attemptedFiles") or [])}
+    machine_files = {str(record.get("frameFile")) for record in machine if record.get("frameFile")}
+    for truth_record in annotations:
+        frame_file = str(truth_record.get("frameFile") or "")
+        if not frame_file or frame_file not in attempted_files or frame_file in machine_files:
+            continue
+        truth_fields = _flatten(truth_record)
+        truth_fields["clock"] = schema.field(
+            float(truth_record.get("atSec") or 0.0), schema.SOURCE_MANUAL
+        )
+        for path, truth_entry in truth_fields.items():
+            if not schema.is_known(truth_entry):
+                continue
+            name = _base_name(path)
+            bucket = per_field.setdefault(
+                name,
+                {"label": (TOLERANCE.get(name) or {}).get("label", name),
+                 "compared": 0, "exact": 0, "close": 0, "missed": 0,
+                 "trustedCompared": 0, "trustedExact": 0, "trustedClose": 0,
+                 "lowConfidence": 0},
+            )
+            misses += 1
+            bucket["missed"] += 1
+
     for bucket in per_field.values():
         n = bucket["compared"]
         bucket["exactRate"] = round(bucket["exact"] / n, 3) if n else None
         bucket["closeRate"] = round(bucket["close"] / n, 3) if n else None
+        trusted_n = bucket["trustedCompared"]
+        bucket["trustedExactRate"] = (
+            round(bucket["trustedExact"] / trusted_n, 3) if trusted_n else None
+        )
 
     report["byField"] = per_field
     report["compared"] = compared
@@ -173,7 +241,28 @@ def run(data_dir: Path, game_id: str) -> dict[str, Any]:
     report["missed"] = misses
     report["exactRate"] = round(exact / compared, 3) if compared else None
     report["closeRate"] = round(close / compared, 3) if compared else None
+    report["readRate"] = round(compared / (compared + misses), 3) if compared + misses else None
+    report["trustedCompared"] = trusted_compared
+    report["trustedExact"] = trusted_exact
+    report["trustedClose"] = trusted_close
+    report["trustedExactRate"] = (
+        round(trusted_exact / trusted_compared, 3) if trusted_compared else None
+    )
+    report["trustedReadRate"] = (
+        round(trusted_compared / (compared + misses), 3) if compared + misses else None
+    )
     report["examples"] = examples
+
+    if last_run:
+        requested = int(last_run.get("requested") or 0)
+        saved = int(last_run.get("saved") or 0)
+        report["clockRecognition"] = {
+            "requested": requested,
+            "recognized": saved,
+            "missed": int(last_run.get("unknownClock") or 0),
+            "rejectedAsOutlier": int(last_run.get("clockOutliers") or 0),
+            "rate": round(saved / requested, 3) if requested else None,
+        }
 
     if compared == 0:
         report["verdict"] = {
@@ -183,16 +272,28 @@ def run(data_dir: Path, game_id: str) -> dict[str, Any]:
         }
         return report
 
-    if compared < 30:
+    if compared < 100:
         report["notes"].append(
             f"只比较了 {compared} 个字段，样本太少，这个准确率不稳定。"
-            "至少标到 100 个字段（大约 10~15 帧）再看结论。"
+            "至少累计 100 个有人工真值的字段再看结论；若每帧只标两项比分，约需 50 帧。"
         )
 
     rate = report["exactRate"] or 0.0
-    if rate >= 0.95:
+    read_rate = report["readRate"] or 0.0
+    trusted_rate = report["trustedExactRate"] or 0.0
+    trusted_read_rate = report["trustedReadRate"] or 0.0
+    enough_sample = compared >= 100
+    if trusted_rate >= 0.95 and trusted_read_rate >= 0.9 and enough_sample:
         verdict = "识别准确率够高，可以考虑用它批量处理，但仍要定期抽样复核。"
         ok = True
+    elif trusted_rate >= 0.95:
+        verdict = ("达到可信阈值的结果目前全部或几乎全部正确，但覆盖或样本量仍不足。"
+                   "可自动预填并人工复核，暂不允许直接进入模型。")
+        ok = False
+    elif read_rate < 0.8:
+        verdict = ("读出来的部分可能较准，但漏读太多。只能当人工标注的预填草稿，"
+                   "不能直接进入模型；需要继续优化裁剪区域和数字预处理。")
+        ok = False
     elif rate >= 0.8:
         verdict = ("识别大体可用，但每 5 个字段就有 1 个不对。"
                    "适合当「人工标注的草稿」用（先跑识别，再人工改），不适合直接进模型。")
@@ -205,7 +306,9 @@ def run(data_dir: Path, game_id: str) -> dict[str, Any]:
     report["verdict"] = {
         "ok": ok,
         "summary": f"完全一致 {rate * 100:.0f}%、可接受 {(report['closeRate'] or 0) * 100:.0f}%"
-                   f"（比较 {compared} 个字段，另有 {misses} 个人工填了但机器没读出来）。{verdict}",
+                   f"、读出率 {read_rate * 100:.0f}%（比较 {compared} 个字段，"
+                   f"另有 {misses} 个人工填了但机器没读出来）；可信结果一致率 "
+                   f"{trusted_rate * 100:.0f}%、可信覆盖 {trusted_read_rate * 100:.0f}%。{verdict}",
     }
     return report
 
