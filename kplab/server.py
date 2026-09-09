@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (__version__, announce, annotate, check, economy_s44, evaluate, events_cv, hud, knowledge_s44,
                minimap, model, ocr, paths, rules, samples, schema, season_s44, sources,
-               state as state_mod, store, video)
+               scoring, state as state_mod, store, video)
 
 WEB_DIR = Path(__file__).parent / "web"
 MAX_BODY = 4 * 1024 * 1024
@@ -1079,6 +1079,72 @@ def _load_model(data_dir: Path) -> dict[str, Any] | None:
     return loaded if isinstance(loaded, dict) and loaded.get("kind") == "trained" else None
 
 
+def api_scoring(game_id: str) -> dict[str, Any]:
+    """一场比赛的逐帧分数 + 全局校准。
+
+    分数模型和 V(s) 基线是**两个不同的东西**，前端必须分开显示：
+    V(s) 回答「历史上这种局面赢多少」，分数回答「按我定的规则这局面值多少」。
+    """
+    data_dir = _console().data_dir
+    if not store.valid_game_id(game_id):
+        return {"ok": False, "error": "比赛编号不合法。"}
+    meta = store.load_meta(data_dir, game_id)
+    if not meta:
+        return {"ok": False, "error": f"没有这场比赛：{game_id}"}
+
+    observations = list(store.read_jsonl_gz(store.observations_path(data_dir, game_id)))
+    if not observations:
+        return {"ok": False, "error": "这场还没有任何观测，算不了分数。"}
+
+    built = state_mod.build(meta, observations, rules.load(data_dir))
+
+    # 校准要用**所有**比赛，不能只用这一场 —— 一场的胜负是 0 或 1，
+    # 拿它去校准等于用一个样本估计一个比例。
+    all_games = []
+    for other in store.list_games(data_dir):
+        other_meta = store.load_meta(data_dir, other)
+        if not other_meta or other_meta.get("blueWin") is None:
+            continue
+        other_obs = list(store.read_jsonl_gz(store.observations_path(data_dir, other)))
+        if other_obs:
+            all_games.append(state_mod.build(other_meta, other_obs, rules.load(data_dir)))
+
+    mapping = scoring.probability_map(all_games) if all_games else {
+        "mode": "assumed", "fitted": False, "anchors": [],
+        "slope": scoring.ASSUMED_LOGISTIC_SLOPE,
+        "note": "本机还没有带胜负标签的比赛，校准不了。",
+    }
+
+    points = []
+    for frame in built.get("frames") or []:
+        scored = scoring.score_frame(frame)
+        probability = scoring.score_to_probability(scored["diff"], mapping)
+        points.append({
+            "atSec": frame["atSec"], "clock": frame["clock"],
+            "blue": scored["blue"], "red": scored["red"], "diff": scored["diff"],
+            "coverage": scored["coverage"], "comparable": scored["comparable"],
+            "breakdown": [b for b in scored["breakdown"] if b.get("available")],
+            "missing": [b for b in scored["breakdown"] if not b.get("available")],
+            "probability": probability["probability"],
+            "probabilityMode": probability["mode"],
+        })
+
+    sample = scoring.score_frame((built.get("frames") or [{}])[0]) if built.get("frames") else {}
+    return {
+        "ok": True,
+        "points": points,
+        "mapping": {k: v for k, v in mapping.items() if k != "calibration"},
+        "calibration": mapping.get("calibration"),
+        "gamesUsedForCalibration": len(all_games),
+        "components": {k: {"label": v["label"], "weight": v["weight"],
+                           "obtainable": v["obtainable"],
+                           "blocker": v.get("blocker", "")}
+                       for k, v in scoring.COMPONENTS.items()},
+        "coverageNote": scoring.coverage_note(),
+        "ceilingNote": sample.get("ceilingNote", ""),
+    }
+
+
 def api_train(body: dict[str, Any]) -> dict[str, Any]:
     """在本机所有比赛上训练一版 V(s)。数据不够会拒绝 —— 那是设计。"""
     data_dir = _console().data_dir
@@ -1455,6 +1521,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(api_frames(_tail(path)))
             elif path.startswith("/api/state/"):
                 self._send_json(api_state(_tail(path)))
+            elif path.startswith("/api/scoring/"):
+                self._send_json(api_scoring(_tail(path)))
             elif path.startswith("/api/analysis/"):
                 self._send_json(api_analysis(_tail(path)))
             elif path.startswith("/api/check/"):

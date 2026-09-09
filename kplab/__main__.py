@@ -17,6 +17,7 @@
     python3 -m kplab train                      训练 V(s)（数据不够会拒绝，那是设计）
     python3 -m kplab events <比赛编号> --refine   从图标变化推事件，并用播报补归属
     python3 -m kplab feasibility                样本够不够？能不能做因果推断？
+    python3 -m kplab scoring                    分数模型：校准、分歧、分数→胜率
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ import sys
 from pathlib import Path
 
 from . import (__version__, announce, annotate, check, economy_s44, evaluate, feasibility, events_cv, hud, knowledge_s44,
-               minimap, model, ocr, paths, rules, schema, sources, state as state_mod, store,
+               minimap, model, ocr, paths, rules, schema, sources, scoring, state as state_mod, store,
                video)
 
 
@@ -585,6 +586,88 @@ def cmd_feasibility(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_games(data_dir) -> list:
+    games = []
+    for game_id in store.list_games(data_dir):
+        meta = store.load_meta(data_dir, game_id)
+        if not meta or meta.get("blueWin") is None:
+            continue
+        observations = list(store.read_jsonl_gz(store.observations_path(data_dir, game_id)))
+        if observations:
+            games.append(state_mod.build(meta, observations, rules.load(data_dir)))
+    return games
+
+
+def cmd_scoring(args: argparse.Namespace) -> int:
+    data_dir = paths.find_data_dir(args.data)
+    games = _load_games(data_dir)
+
+    print("=" * 76)
+    print("分数模型")
+    print("=" * 76)
+    for line in scoring.coverage_note().split("\n"):
+        print(f"  {line}")
+
+    print()
+    print("── 分项 ──")
+    print(f"  {'分项':<18}{'权重':>5}  {'能拿到':<6}说明")
+    for key, spec in scoring.COMPONENTS.items():
+        mark = "✅" if spec["obtainable"] else "❌"
+        detail = (spec.get("blocker") or spec["how"])[:44]
+        print(f"  {spec['label']:<18}{spec['weight']:>5}  {mark:<6}{detail}")
+
+    if not games:
+        print()
+        print("  还没有带胜负标签的比赛，校准不了。")
+        print("  **在校准之前，这套权重只是一组假设。**")
+        return 1
+
+    print()
+    print(f"── 校准（{len(games)} 场）──")
+    print("  问一个很简单的问题：分数差越大，实际胜率真的越高吗？")
+    calibration = scoring.calibrate(games)
+    if calibration["rows"]:
+        print()
+        print(f"  {'分数差档':<12}{'帧数':>7}{'胜率':>7}{'95% 区间':>15}")
+        for row in calibration["rows"]:
+            bar = "█" * int(row["blueWinRate"] * 20)
+            print(f"  {row['range']:<12}{row['frames']:>7}{row['blueWinRate'] * 100:>6.0f}%   "
+                  f"[{row['ciLow'] * 100:>3.0f}%,{row['ciHigh'] * 100:>3.0f}%]  {bar}")
+    print()
+    for line in calibration["verdict"].split("\n"):
+        print(f"  {line}")
+
+    mapping = scoring.probability_map(games)
+    print()
+    print(f"── 分数 → 胜率（模式：{mapping['mode']}）──")
+    for line in mapping["note"].split("\n"):
+        print(f"  {line}")
+    print()
+    for diff in (-20, -10, -3, 0, 3, 10, 20):
+        result = scoring.score_to_probability(diff, mapping)
+        flag = "  ⚠️ " + result["warning"][:40] if result.get("warning") else ""
+        print(f"    分数差 {diff:>+4} → {result['probability'] * 100:>5.1f}%{flag}")
+
+    found = scoring.disagreements(games, threshold=args.threshold, limit=args.top)
+    print()
+    print(f"── 分歧样本（{len(found)} 个）──")
+    print("  分数说这边稳赢、结果那边赢了。**一致的地方什么也学不到，"
+          "分歧的地方才有信息。**")
+    for item in found:
+        print(f"    {item['gameId']} {item['clock']}  分数差 {item['scoreDiff']:+.1f} "
+              f"偏向{item['scoreFavoured']}，实际{item['actualWinner']}赢")
+        for contributor in item["topContributors"][:2]:
+            print(f"        主要来自 {contributor['label']} {contributor['contribution']:+.1f}")
+
+    print()
+    print("=" * 76)
+    print("  分数模型只能反映你已有的认知 —— 权重说开龙值 5 分，它就说开龙好。")
+    print("  校准是唯一能让它被数据打脸的环节。**通过校准也只说明它不离谱，**")
+    print("  **不说明每一项的权重都对** —— 几组不同的权重可能给出同样好的曲线。")
+    print("=" * 76)
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     from . import server
     server.serve(paths.find_data_dir(args.data), port=args.port)
@@ -678,6 +761,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--per-game", dest="per_game", type=float, default=4.0,
                    help="一场比赛能观察到几次该动作（**这个数字最关键**）")
     p.set_defaults(func=cmd_feasibility)
+
+    p = sub.add_parser("scoring", help="分数模型：校准、分歧、分数→胜率")
+    p.add_argument("--threshold", type=float, default=10.0, help="多大的分数差算「稳赢」")
+    p.add_argument("--top", type=int, default=6, help="列几个分歧样本")
+    p.set_defaults(func=cmd_scoring)
 
     p = sub.add_parser("serve", help="打开网页控制台（推荐）")
     p.add_argument("--port", type=int, default=8020,

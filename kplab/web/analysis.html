@@ -139,6 +139,30 @@
     </details>
   </div>
 
+  <div class="card" id="scoreCard" style="display:none">
+    <h2>分数模型 <span id="scoreMode" class="pill"></span></h2>
+    <p class="hint" id="scoreHint"></p>
+    <div class="stat" style="margin-bottom:12px">
+      <div><b id="scNow">—</b><span>当前分数差（蓝-红）</span></div>
+      <div><b id="scProb">—</b><span>对应胜率</span></div>
+      <div><b id="scCov">—</b><span>分项覆盖</span></div>
+      <div><b id="scGames">—</b><span>校准用了几场</span></div>
+    </div>
+    <div class="chart" id="scWrap">
+      <svg id="scSvg" viewBox="0 0 900 190" role="img" aria-label="分数差随时间变化"></svg>
+    </div>
+    <div class="legend">
+      <span><i class="swatch" style="background:var(--blue)"></i>蓝方分数领先</span>
+      <span><i class="swatch" style="background:var(--red)"></i>红方分数领先</span>
+      <span style="color:var(--text-3)">点上面的拐点，下方会显示那一刻的分项拆解</span>
+    </div>
+    <details style="margin-top:12px">
+      <summary>这个分数覆盖了什么、没覆盖什么</summary>
+      <p class="hint" id="scCoverage" style="white-space:pre-wrap;margin-top:8px"></p>
+      <table id="scComponents"></table>
+    </details>
+  </div>
+
   <div class="card">
     <h2>拐点清单</h2>
     <p class="hint">
@@ -153,7 +177,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-let DATA = null, SEL = -1;
+let DATA = null, SEL = -1, SCORE = null;
 const W = 900, H = 340, PAD = {t:18, r:20, b:34, l:46};
 
 function qs(k){ return new URLSearchParams(location.search).get(k)||''; }
@@ -224,6 +248,70 @@ async function load(){
 
   draw(); renderList(); renderTable();
   $('body').style.display='block';
+  loadScoring(game);
+}
+
+async function loadScoring(game){
+  const res = await api('/api/scoring/'+encodeURIComponent(game));
+  if(!res.ok){ $('scoreCard').style.display='none'; return; }
+  SCORE = res;
+  $('scoreCard').style.display='block';
+
+  const fitted = res.mapping.mode === 'fitted';
+  $('scoreMode').className = 'pill ' + (fitted?'on':'off');
+  $('scoreMode').textContent = fitted ? '已用数据校准' : '未校准 · 胜率是假设的';
+  $('scoreHint').innerHTML = fitted
+    ? '分数差 → 胜率的映射是从 <b>' + res.gamesUsedForCalibration + ' 场</b>的历史里拟合的'
+      + '（保序回归）。<b>拟合出来的是相关，不是因果。</b>'
+    : '<b>还不够校准。</b>' + esc(res.mapping.note || '')
+      + '<br>分数本身是按你定的权重算的；<b>由它推出的胜率现在是假设，不是预测。</b>';
+
+  const last = res.points[res.points.length-1] || {};
+  $('scNow').textContent = last.diff !== undefined ? (last.diff>0?'+':'')+last.diff.toFixed(1) : '—';
+  $('scProb').textContent = last.probability !== undefined
+    ? (last.probability*100).toFixed(0)+'%' : '—';
+  $('scCov').textContent = last.coverage !== undefined
+    ? Math.round(last.coverage*100)+'%' : '—';
+  $('scGames').textContent = res.gamesUsedForCalibration;
+
+  $('scCoverage').textContent = (res.coverageNote||'') + '\n\n' + (res.ceilingNote||'');
+  $('scComponents').innerHTML =
+    '<thead><tr><th>分项</th><th>权重</th><th>能拿到</th><th>拿不到的原因</th></tr></thead><tbody>'
+    + Object.values(res.components).map(c=>
+      `<tr><td>${esc(c.label)}</td><td>${c.weight}</td>
+       <td>${c.obtainable?'<span class="up">✓</span>':'<span class="down">✗</span>'}</td>
+       <td style="color:var(--text-3)">${esc(c.blocker||'')}</td></tr>`).join('')
+    + '</tbody>';
+  drawScore();
+}
+
+function drawScore(){
+  if(!SCORE || !SCORE.points.length) return;
+  const W2=900, H2=190, P={t:14,r:20,b:26,l:46};
+  const pts = SCORE.points.filter(p=>p.comparable);
+  if(!pts.length){ $('scSvg').innerHTML =
+    '<text x="450" y="95" text-anchor="middle" fill="#5b6373" font-size="13">'
+    + '这场没有分项覆盖足够的帧，算不出可比的分数</text>'; return; }
+  const maxT = Math.max(...pts.map(p=>p.atSec))||1;
+  const span = Math.max(5, ...pts.map(p=>Math.abs(p.diff)));
+  const X = s => P.l + (s/maxT)*(W2-P.l-P.r);
+  const Y = d => P.t + (1 - (d+span)/(2*span))*(H2-P.t-P.b);
+  let g='';
+  for(const v of [span, 0, -span]){
+    g += `<line x1="${P.l}" y1="${Y(v)}" x2="${W2-P.r}" y2="${Y(v)}"
+      stroke="${v===0?'#3a4150':'#232935'}" ${v===0?'stroke-dasharray="4 4"':''}/>
+      <text x="${P.l-8}" y="${Y(v)+4}" text-anchor="end" fill="#5b6373" font-size="11">${v>0?'+':''}${v.toFixed(0)}</text>`;
+  }
+  const area = up => {
+    let d = `M ${X(pts[0].atSec)} ${Y(0)}`;
+    pts.forEach(p=>{ d += ` L ${X(p.atSec)} ${Y(up?Math.max(0,p.diff):Math.min(0,p.diff))}`; });
+    return d + ` L ${X(pts[pts.length-1].atSec)} ${Y(0)} Z`;
+  };
+  g += `<path d="${area(true)}" fill="var(--blue)" opacity=".18"/>`;
+  g += `<path d="${area(false)}" fill="var(--red)" opacity=".18"/>`;
+  g += `<path d="${pts.map((p,i)=>`${i?'L':'M'} ${X(p.atSec)} ${Y(p.diff)}`).join(' ')}"
+        fill="none" stroke="#c6ccd8" stroke-width="2" stroke-linejoin="round"/>`;
+  $('scSvg').innerHTML = g;
 }
 
 function draw(){
@@ -353,6 +441,7 @@ function pick(i){
       <dt>这一段发生了什么</dt><dd><ul class="what">${
         ex.whatHappened.map(w=>`<li>${esc(w)}</li>`).join('')}</ul></dd>
     </dl>
+    ${scoreBreakdownFor(f.atSec)}
     <div class="blocked">
       <h3>${esc(b.title)}　—　未实现</h3>
       <p>${esc(b.why)}
@@ -363,6 +452,24 @@ function pick(i){
       <b>它不代表因果</b> —— 同一时刻场上有十个人在做十件事，
       曲线只知道局面变了，不知道是谁让它变的。</p>`;
   $('detail').scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+function scoreBreakdownFor(atSec){
+  if(!SCORE) return '';
+  const p = SCORE.points.find(x=>Math.abs(x.atSec-atSec)<0.5);
+  if(!p || !p.comparable) return '';
+  const rows = p.breakdown.slice().sort((a,b)=>Math.abs(b.contribution)-Math.abs(a.contribution));
+  return `<dl class="kv" style="margin-top:10px">
+    <dt>这一刻的分数</dt><dd>蓝 ${p.blue.toFixed(1)}　红 ${p.red.toFixed(1)}　
+      差 <b>${p.diff>0?'+':''}${p.diff.toFixed(1)}</b>
+      ${p.probabilityMode==='fitted'
+        ? `　→ 胜率 ${(p.probability*100).toFixed(0)}%`
+        : `　→ 胜率 ${(p.probability*100).toFixed(0)}% <span class="down">(假设)</span>`}</dd>
+    <dt>分项拆解</dt><dd>${rows.map(r=>
+      `${esc(r.label)} <b>${r.contribution>0?'+':''}${r.contribution.toFixed(1)}</b>`).join('　')}
+      ${p.missing.length?`<br><span style="color:var(--text-3)">缺 ${p.missing.length} 项：`
+        + p.missing.map(m=>esc(m.label)).join('、')+'</span>':''}</dd>
+  </dl>`;
 }
 
 function renderTable(){
