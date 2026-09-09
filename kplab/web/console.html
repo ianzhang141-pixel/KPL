@@ -104,20 +104,35 @@
   .action-help { background:#101824; border:1px solid #29456f; border-radius:8px;
                  padding:10px 12px; margin:10px 0 12px; color:#aab4c4; font-size:12px; }
   .action-help b { color:#dbeafe; }
-  .sample-filter { margin:10px 0 12px; padding:10px 12px; background:#0f1216;
-                   border:1px solid #232935; border-radius:8px; }
-  .sample-filter-head { display:flex; justify-content:space-between; align-items:center;
-                        gap:10px; margin-bottom:8px; flex-wrap:wrap; }
-  .sample-filter-boxes { display:flex; gap:8px; flex-wrap:wrap; }
-  .sample-chip { display:inline-flex; align-items:center; gap:6px; padding:5px 11px;
-                 border:1px solid #2f3644; border-radius:99px; font-size:12.5px;
+  /* 筛选控件直接做在表头上 —— 用户找不到独立的那一行，
+     而表头就是大家会去找筛选的地方。 */
+  .filter-th { position:relative; overflow:visible; }
+  .th-filter { background:none; border:1px solid transparent; color:inherit;
+               font:inherit; font-weight:500; padding:2px 6px; border-radius:5px;
+               cursor:pointer; display:inline-flex; align-items:center; gap:5px; }
+  .th-filter:hover { border-color:#2f3644; background:#1b2029; color:#e6e9ef; }
+  .th-filter .caret { font-size:10px; opacity:.7; }
+  .th-badge { display:none; background:#3b82f6; color:#fff; border-radius:99px;
+              padding:0 6px; font-size:10.5px; line-height:16px; font-weight:600; }
+  .th-badge.on { display:inline-block; }
+  .filter-panel { display:none; position:absolute; top:100%; left:0; z-index:30;
+                  margin-top:6px; min-width:270px; padding:12px 14px;
+                  background:#171b22; border:1px solid #2f3644; border-radius:9px;
+                  box-shadow:0 10px 28px rgba(0,0,0,.55); white-space:normal;
+                  font-weight:400; }
+  .filter-panel.open { display:block; }
+  .filter-panel-head { display:flex; justify-content:space-between; align-items:center;
+                       gap:10px; margin-bottom:9px; }
+  .filter-panel-boxes { display:flex; flex-direction:column; gap:6px; }
+  .sample-chip { display:flex; align-items:center; gap:8px; padding:6px 10px;
+                 border:1px solid #2f3644; border-radius:7px; font-size:12.5px;
                  cursor:pointer; user-select:none; color:#8b93a1;
                  background:#171b22; white-space:nowrap; }
   .sample-chip:hover { border-color:#3b82f6; }
   .sample-chip.on { border-color:#3b82f6; color:#e6e9ef; background:#1e2a3d; }
   .sample-chip.empty { opacity:.45; }
   .sample-chip input { margin:0; accent-color:#3b82f6; }
-  .sample-chip b { font-weight:600; }
+  .sample-chip b { font-weight:500; flex:1; }
   .sample-chip .cnt { color:#5b6373; font-size:11.5px; }
   .sample-chip.on .cnt { color:#7aa7ff; }
   button.tiny { padding:3px 9px; font-size:11.5px; }
@@ -324,20 +339,28 @@
       </select></div>
       <button class="ghost" onclick="clearGameFilters()">清空检索</button>
     </div>
-    <div class="sample-filter">
-      <div class="sample-filter-head">
-        <label style="margin:0">按样本类型筛选（可多选）</label>
-        <span>
-          <button class="ghost tiny" onclick="setAllSampleTypes(true)">全选</button>
-          <button class="ghost tiny" onclick="setAllSampleTypes(false)">全不选</button>
-        </span>
-      </div>
-      <div id="sampleTypeFilter" class="sample-filter-boxes"></div>
-      <p class="hint" id="sampleFilterNote" style="margin:6px 0 0"></p>
-    </div>
     <div class="table-wrap">
       <table class="game-list-table">
-        <thead><tr><th>比赛</th><th>样本类型</th><th>重点对象</th><th>赛事 / 赛季</th><th>帧图</th><th>标注</th><th>观测</th><th>胜负</th><th></th></tr></thead>
+        <thead><tr><th>比赛</th>
+          <th class="filter-th">
+            <button type="button" class="th-filter" id="sampleFilterBtn"
+                    onclick="toggleSamplePanel(event)" title="点这里按样本类型筛选">
+              样本类型 <span id="sampleFilterBadge" class="th-badge"></span>
+              <span class="caret">▾</span>
+            </button>
+            <div class="filter-panel" id="samplePanel">
+              <div class="filter-panel-head">
+                <b>只显示这些类型</b>
+                <span>
+                  <button class="ghost tiny" onclick="setAllSampleTypes(true)">全选</button>
+                  <button class="ghost tiny" onclick="setAllSampleTypes(false)">全不选</button>
+                </span>
+              </div>
+              <div id="sampleTypeFilter" class="filter-panel-boxes"></div>
+              <p class="hint" id="sampleFilterNote" style="margin:8px 0 0"></p>
+            </div>
+          </th>
+          <th>重点对象</th><th>赛事 / 赛季</th><th>帧图</th><th>标注</th><th>观测</th><th>胜负</th><th></th></tr></thead>
         <tbody id="gameRows"><tr><td colspan="9" style="color:#8b93a1">还没有比赛。</td></tr></tbody>
       </table>
     </div>
@@ -877,6 +900,14 @@ function refreshSampleChips() {
     chip.classList.toggle('on', on);
   });
   const chosen = sampleTypeSelection.size;
+  // 表头徽章：**列表被筛过时必须看得出来**，
+  // 否则「怎么少了几场」会被当成数据丢了。
+  const badge = $('sampleFilterBadge');
+  if (badge) {
+    const filtering = chosen !== types.length;
+    badge.classList.toggle('on', filtering);
+    badge.textContent = filtering ? `${chosen}/${types.length}` : '';
+  }
   $('sampleFilterNote').innerHTML = chosen === 0
     ? '<span class="warn">一个类型都没勾选，下面会是空的。</span>'
     : chosen === types.length
@@ -885,6 +916,24 @@ function refreshSampleChips() {
         types.filter(t => sampleTypeSelection.has(t.value))
              .map(t => safe(t.label)).join('、');
 }
+
+function toggleSamplePanel(event) {
+  if (event) event.stopPropagation();
+  $('samplePanel').classList.toggle('open');
+}
+
+// 点面板外面就收起来。面板里面的点击不能冒泡出去，
+// 否则勾一个就关一次，多选变成了单选。
+document.addEventListener('click', event => {
+  const panel = $('samplePanel');
+  if (!panel || !panel.classList.contains('open')) return;
+  if (panel.contains(event.target)) return;
+  if (event.target.closest && event.target.closest('#sampleFilterBtn')) return;
+  panel.classList.remove('open');
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') { const p = $('samplePanel'); if (p) p.classList.remove('open'); }
+});
 
 function toggleSampleType(value, checked) {
   if (checked) sampleTypeSelection.add(value); else sampleTypeSelection.delete(value);
